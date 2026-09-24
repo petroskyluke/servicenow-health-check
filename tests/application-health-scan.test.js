@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../Scripts/USEM_HC_ApplicationHealthScan.js'), 'utf8');
 const tables = ['sys_script_client', 'sys_script', 'sys_ui_action', 'sys_script_include', 'sysauto_script'];
 
-function run(apps, data = {}, invalid = [], missingFields = {}, queryErrors = []) {
+function run(apps, data = {}, invalid = [], missingFields = {}, queryErrors = [], scriptSource = source) {
     const output = [], queries = [];
     class GlideRecord {
         constructor(table) { this.table = table; this.filters = []; this.rows = []; this.index = -1; this.limit = Infinity; }
@@ -38,7 +38,7 @@ function run(apps, data = {}, invalid = [], missingFields = {}, queryErrors = []
         getUniqueValue() { return this.getValue('sys_id'); }
         get(id) { this.addQuery('sys_id', id); this.query(); return this.next(); }
     }
-    vm.runInNewContext(source.replace("var appNames = ['sn_sec_cmn'];", 'var appNames = ' + JSON.stringify(apps) + ';'), {
+    vm.runInNewContext(scriptSource.replace("var appNames = ['sn_sec_cmn'];", 'var appNames = ' + JSON.stringify(apps) + ';'), {
         GlideRecord, gs: { print: line => output.push(line) }
     });
     return { text: output.join('\n'), queries };
@@ -227,9 +227,9 @@ const grData = {
     ]
 };
 result = run(['sn_sec_cmn'], grData);
-assert.match(result.text, /record: created-gr \| origin: Custom Created \| priority: SEVERE \| exact-gr declarations: 4/);
-assert.match(result.text, /record: unknown-custom-gr \| origin: Custom Created \| priority: SEVERE/);
-assert.match(result.text, /record: modified-oob-gr \| origin: Customized OOB\/Store file \| priority: LOW/);
+assert.match(result.text, /record: created-gr \| origin: Custom Created \| priority: High \| exact-gr declarations: 4/);
+assert.match(result.text, /record: unknown-custom-gr \| origin: Custom Created \| priority: High/);
+assert.match(result.text, /record: modified-oob-gr \| origin: Customized OOB\/Store file \| priority: Low/);
 assert.doesNotMatch(result.text, /record: untouched-oob-gr/);
 assert.doesNotMatch(result.text, /record: untouched-no-baseline/);
 assert.doesNotMatch(result.text, /record: oob-rule-gr/);
@@ -248,7 +248,7 @@ result = run(['sn_sec_cmn'], {
 assert.equal(result.text, '\nApplication: sn_sec_cmn | Scope sys_id: scope-a | Records scanned: 1\nNo findings.');
 // Per-user origin fallback applies even if baseline metadata cannot be queried.
 result = run(['sn_sec_cmn'], grData, [], {}, ['sys_update_version']);
-assert.match(result.text, /record: modified-oob-gr \| origin: Custom Created \| priority: SEVERE/);
+assert.match(result.text, /record: modified-oob-gr \| origin: Custom Created \| priority: High/);
 assert.doesNotMatch(result.text, /record: untouched-oob-gr/);
 // Both applications stay separate after applying the uniform record filter.
 result = run(['sn_sec_cmn', 'sn_vul'], grData);
@@ -286,10 +286,10 @@ for (const id of ['created-rule', 'created-job', 'modified-rule', 'modified-job'
     for (const line of lines) {
         assert.equal((line.match(/priority:/g) || []).length, 1);
         if (id.startsWith('created')) {
-            assert.match(line, /origin: Custom Created \| priority: SEVERE/);
+            assert.match(line, /origin: Custom Created \| priority: High/);
             assert.doesNotMatch(line, /inherited from OOB/);
         } else {
-            assert.match(line, /origin: Customized OOB\/Store file \| priority: LOW \| note: finding may be inherited from OOB/);
+            assert.match(line, /origin: Customized OOB\/Store file \| priority: Low \| note: finding may be inherited from OOB/);
         }
     }
 }
@@ -302,4 +302,55 @@ for (const table of tables) stockOnly[table] = (priorityData[table] || []).filte
 result = run(['sn_sec_cmn'], stockOnly);
 assert.equal(result.text, '\nApplication: sn_sec_cmn | Scope sys_id: scope-a | Records scanned: 0\nNo findings.');
 assert.ok(!result.queries.some(q => q.table === 'sys_user' || q.table === 'sys_update_version'));
-console.log('Passed: untouched OOB excluded from every check, low-priority modified OOB findings with inheritance note, severe Custom Created findings across all five checks, exact-gr matching, scope isolation, and output regressions.');
+// Guidance appears beneath every finding, for all five checks and both origins.
+result = run(['sn_sec_cmn'], priorityData);
+const reportLines = result.text.split('\n');
+const guidancePairs = [];
+for (let i = 0; i < reportLines.length; i++) {
+    if (!reportLines[i].includes(' | record: ')) continue;
+    assert.match(reportLines[i + 1], /^    Why: .+\.$/);
+    assert.match(reportLines[i + 2], /^    Suggested alternative: .+\.$/);
+    assert.ok(!reportLines[i + 3] || !reportLines[i + 3].startsWith('    Suggested alternative:'));
+    guidancePairs.push(reportLines[i + 1] + '\n' + reportLines[i + 2]);
+}
+assert.equal(guidancePairs.length, 10);
+assert.equal(new Set(guidancePairs).size, 5);
+assert.doesNotMatch(result.text, /priority: (?:SEVERE|HIGH|LOW)/);
+assert.equal((result.text.match(/priority: High/g) || []).length, 5);
+assert.equal((result.text.match(/priority: Low/g) || []).length, 5);
+// Verify the guidance follows its check, rather than a shared or miswired note.
+const sections = [
+    ['Hard-coded sys_ids:', /Why: .*sys_ids/, /Suggested alternative: .*lookup/],
+    ['gs.info():', /Why: .*production logs/, /Suggested alternative: .*gs.debug\(\)/],
+    ['Exact "gr" declarations:', /Why: .*shared scope/, /Suggested alternative: .*grMembers/],
+    ['current.update():', /Why: .*recursion/, /Suggested alternative: .*before Business Rule/],
+    ['Inactive Run as users:', /Why: .*inactive Run as/, /Suggested alternative: .*approved active Run as/]
+];
+for (const [heading, why, alternative] of sections) {
+    const start = reportLines.indexOf(heading);
+    assert.ok(start >= 0);
+    assert.match(reportLines[start + 2], why);
+    assert.match(reportLines[start + 3], alternative);
+}
+// Editing only the configuration text must change every corresponding finding.
+const editedSource = source.replace(
+    "why: 'Hardcoded sys_ids couple code to specific records that may differ between instances or be replaced.'",
+    "why: 'Edited team explanation.'"
+).replace(
+    "alternative: 'Use a configurable reference, a server-side system property, or a validated record lookup instead of embedding the sys_id.'",
+    "alternative: 'Edited team alternative.'"
+);
+result = run(['sn_sec_cmn'], priorityData, [], {}, [], editedSource);
+assert.equal((result.text.match(/Why: Edited team explanation\./g) || []).length, 2);
+assert.equal((result.text.match(/Suggested alternative: Edited team alternative\./g) || []).length, 2);
+// No empty sections or remediation text when there are no findings.
+result = run(['sn_sec_cmn'], stockOnly);
+assert.doesNotMatch(result.text, /Why:|Suggested alternative:/);
+// Missing Run as users are warnings, not inactive-user findings with misleading advice.
+result = run(['sn_sec_cmn'], {
+    sys_scope: scopes,
+    sysauto_script: [record('warning-only', 'scope-a', '', { sys_customer_update: 'true', active: '1' })]
+});
+assert.match(result.text, /Active scheduled job has no Run as user/);
+assert.doesNotMatch(result.text, /Why:|Suggested alternative:/);
+console.log('Passed: High/Low priorities, editable per-finding guidance for all five checks, correct guidance mapping, empty output, warning handling, and selection/multi-scope regressions.');

@@ -7,6 +7,35 @@
     // Add multiple names to scan them in one run, e.g. ['sn_sec_cmn', 'sn_vul'].
     var appNames = ['sn_sec_cmn'];
 
+    /********************************************************************
+     * EDITABLE FINDING NOTES
+     * Keep each why and alternative to one sentence.
+     * These notes print beneath every matching finding; edit the text here.
+     * ServiceNow source links and limitations are documented in README.md.
+     ********************************************************************/
+    var findingGuidance = {
+        sysIds: {
+            why: 'Hardcoded sys_ids couple code to specific records that may differ between instances or be replaced.',
+            alternative: 'Use a configurable reference, a server-side system property, or a validated record lookup instead of embedding the sys_id.'
+        },
+        gsInfo: {
+            why: 'Routine diagnostic gs.info() calls can clutter production logs and make important messages harder to find.',
+            alternative: 'Remove temporary logging or use gs.debug() with debug logging disabled by default, retaining gs.info() for useful operational events.'
+        },
+        grVariables: {
+            why: 'A generic gr variable obscures its purpose and can collide with other scripts if it leaks into shared scope.',
+            alternative: 'Use a descriptive name such as grMembers and keep the variable inside a function or other appropriate local scope.'
+        },
+        currentUpdate: {
+            why: 'Calling current.update() in a Business Rule can trigger recursion, duplicate processing, and extra database writes.',
+            alternative: 'Set current fields in a before Business Rule and let ServiceNow save them automatically, using after rules for related-record updates.'
+        },
+        inactiveRunAs: {
+            why: 'An inactive Run as account can cause an active scheduled job to behave unexpectedly and leaves its execution identity needing review.',
+            alternative: 'Select an approved active Run as account with the required roles and test execution, or deactivate the job if it is no longer needed.'
+        }
+    };
+
     var tables = [
         'sys_script_client',  // Client Scripts
         'sys_script',         // Business Rules
@@ -171,14 +200,14 @@
                 grandTotals.recordsScanned++;
 
                 var recordOrigin = getRecordOrigin(recordGR, tableName);
-                var recordPriority = recordOrigin == 'Custom Created' ? 'SEVERE' : 'LOW';
+                var recordPriority = recordOrigin == 'Custom Created' ? 'High' : 'Low';
                 var recordLabel = getRecordLabel(recordGR);
                 var recordId = recordGR.getUniqueValue();
                 var recordContext = tableName + ' | ' + recordLabel +
                     ' | record: ' + recordId +
                     ' | origin: ' + recordOrigin +
                     ' | priority: ' + recordPriority;
-                if (recordPriority == 'LOW') {
+                if (recordPriority == 'Low') {
                     recordContext += ' | note: finding may be inherited from OOB';
                 }
 
@@ -348,11 +377,11 @@
             gs.print(summaryTable + ' | ' + counts.join(' | '));
         }
 
-        printDetailSection('Hard-coded sys_ids', details.sysIds);
-        printDetailSection('gs.info()', details.gsInfo);
-        printDetailSection('Exact "gr" declarations', details.grVariables);
-        printDetailSection('current.update()', details.currentUpdate);
-        printDetailSection('Inactive Run as users', details.inactiveRunAs);
+        printDetailSection('Hard-coded sys_ids', details.sysIds, findingGuidance.sysIds);
+        printDetailSection('gs.info()', details.gsInfo, findingGuidance.gsInfo);
+        printDetailSection('Exact "gr" declarations', details.grVariables, findingGuidance.grVariables);
+        printDetailSection('current.update()', details.currentUpdate, findingGuidance.currentUpdate);
+        printDetailSection('Inactive Run as users', details.inactiveRunAs, findingGuidance.inactiveRunAs);
         printDetailSection('Skipped tables', details.skippedTables);
         printDetailSection('Warnings', details.warnings);
 
@@ -578,13 +607,17 @@
         }
     }
 
-    function printDetailSection(title, items) {
+    function printDetailSection(title, items, guidance) {
         if (items.length === 0) {
             return;
         }
         gs.print(title + ':');
         for (var i = 0; i < items.length; i++) {
             gs.print('  ' + items[i]);
+            if (guidance) {
+                gs.print('    Why: ' + guidance.why);
+                gs.print('    Suggested alternative: ' + guidance.alternative);
+            }
         }
     }
 
