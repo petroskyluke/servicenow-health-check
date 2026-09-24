@@ -5,19 +5,23 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../Scripts/USEM_HC_ApplicationHealthScan.js'), 'utf8');
 const tables = ['sys_script_client', 'sys_script', 'sys_ui_action', 'sys_script_include', 'sysauto_script'];
 
-function run(apps, data = {}, invalid = [], missingFields = {}) {
+function run(apps, data = {}, invalid = [], missingFields = {}, queryErrors = []) {
     const output = [], queries = [];
     class GlideRecord {
         constructor(table) { this.table = table; this.filters = []; this.rows = []; this.index = -1; this.limit = Infinity; }
-        addQuery(field, value) { this.filters.push([field, value]); }
+        addQuery(field, operator, value) {
+            this.filters.push(arguments.length === 3 ? [field, value, operator] : [field, operator]);
+        }
         addNotNullQuery(field) { this.filters.push([field, 'NOT_NULL']); }
         addNullQuery(field) { this.filters.push([field, 'NULL']); }
         orderByDesc(field) { this.sortField = field; }
         setLimit(limit) { this.limit = limit; }
         query() {
+            if (queryErrors.includes(this.table)) throw new Error('Query denied');
             queries.push({ table: this.table, filters: this.filters });
             for (const [field] of this.filters) assert.ok(this.isValidField(field), 'Invalid query field: ' + field);
-            this.rows = (data[this.table] || []).filter(row => this.filters.every(([k, v]) => {
+            this.rows = (data[this.table] || []).filter(row => this.filters.every(([k, v, operator]) => {
+                if (operator === 'IN') return v.split(',').includes(row[k]);
                 if (v === 'NOT_NULL') return row[k] != null && row[k] !== '';
                 if (v === 'NULL') return row[k] == null || row[k] === '';
                 return row[k] === v;
@@ -66,7 +70,7 @@ assert.doesNotMatch(result.text, /foreign|uncustomized|sys_script_client|sys_ui_
 assert.ok(result.queries.filter(q => q.table === 'sys_scope').every(q => q.filters[0][0] === 'scope'));
 assert.ok(result.queries.filter(q => tables.includes(q.table)).every(q => q.filters.some(([k, v]) => k === 'sys_scope' && ['scope-a', 'scope-b'].includes(v))));
 result = run(['sn_sec_cmn'], { sys_scope: scopes });
-assert.equal(result.text, 'Application: sn_sec_cmn | Records scanned: 0\nNo findings.');
+assert.equal(result.text, '\nApplication: sn_sec_cmn | Scope sys_id: scope-a | Records scanned: 0\nNo findings.');
 result = run(['sn_sec_cmn'], { sys_scope: scopes }, ['sys_script'], { sys_ui_action: ['sys_scope'] });
 assert.match(result.text, /Skipped tables:/);
 assert.match(result.text, /No findings in completed checks/);
@@ -125,7 +129,7 @@ const selectionData = {
         { name: 'untouched-oob', state: 'CURRENT' },
         { name: 'sys_script_include_untouched-oob', state: 'CURRENT', source: 'System Upgrade' },
         { name: 'sys_script_include_untouched-oob', state: 'PREVIOUS', source: 'Update Set' },
-        { name: 'sys_script_include_changed-oob', state: 'HISTORY', source: 'System Upgrade' }
+        { name: 'sys_script_include_changed-oob', state: 'HISTORY', source_table: 'sys_upgrade_history' }
     ]
 };
 result = run(['sn_sec_cmn'], selectionData);
@@ -136,7 +140,7 @@ for (const id of ['untouched-oob', 'bare-id', 'wrong-table', 'internal-only', 'p
     assert.ok(!result.text.includes(' | record: ' + id + ' |'), 'Expected excluded record: ' + id);
 }
 assert.match(result.text, /Records scanned: 8/);
-assert.ok(!result.queries.some(q => q.table === 'sys_update_version'));
+assert.ok(result.queries.filter(q => q.table === 'sys_update_version').every(q => !q.filters.some(([k, v]) => k === 'name' && v === 'sys_script_include_untouched-oob')));
 // Missing virtual metadata fields still permit the exact table + sys_id lookup.
 result = run(['sn_sec_cmn'], selectionData, [], { sys_script_include: ['sys_customer_update', 'sys_update_name', 'sys_class_name'] });
 assert.match(result.text, /record: new-custom/);
@@ -151,4 +155,52 @@ for (const field of ['name', 'category', 'action', 'update_set', 'remote_update_
 result = run(['sn_sec_cmn'], selectionData, ['sys_update_xml']);
 assert.match(result.text, /Scan stopped:/);
 assert.equal(result.queries.length, 0);
-console.log('Passed: scope selection, multiple apps, all finding types, concise output, custom inserts, customized OOB, untouched OOB exclusion, exact update names, applied updates, deletion filtering, and unavailable metadata.');
+
+// Every finding carries its origin, within an application block with the scope ID.
+const reportData = {
+    ...data,
+    sys_update_version: [
+        { name: 'sys_script_rule-a', source_table: 'sys_upgrade_history' },
+        { name: 'sys_script_include_include-b', source_table: 'sys_store_app' }
+    ],
+    sys_update_xml: [...data.sys_update_xml, update('sys_script_rule-b', { action: 'INSERT' })]
+};
+result = run(['sn_sec_cmn', 'sn_vul'], reportData);
+const appAHeader = 'Application: sn_sec_cmn | Scope sys_id: scope-a';
+const appBHeader = 'Application: sn_vul | Scope sys_id: scope-b';
+assert.ok(result.text.includes(appAHeader));
+assert.ok(result.text.includes(appBHeader));
+const splitAt = result.text.indexOf(appBHeader);
+assert.ok(result.text.slice(0, splitAt).includes('record: rule-a'));
+assert.ok(!result.text.slice(0, splitAt).includes('record: rule-b'));
+assert.ok(result.text.slice(splitAt).includes('record: rule-b'));
+assert.ok(!result.text.slice(splitAt).includes('record: rule-a'));
+assert.match(result.text, /record: rule-a \| origin: Customized OOB\/Store file/);
+assert.match(result.text, /record: include-b \| origin: Customized OOB\/Store file/);
+assert.match(result.text, /record: rule-b \| origin: Likely customer-created \(insert evidence\)/);
+assert.match(result.text, /record: job-b \| origin: Unknown origin/);
+assert.ok(result.text.split('\n').filter(line => line.includes(' | record: ')).every(line => line.includes(' | origin: ')));
+// Positive baseline evidence wins even if there is also an INSERT customer update.
+result = run(['sn_sec_cmn'], {
+    ...selectionData,
+    sys_update_version: [...selectionData.sys_update_version, { name: 'sys_script_include_new-custom', source_table: 'sys_store_app' }]
+});
+assert.match(result.text, /record: new-custom \| origin: Customized OOB\/Store file/);
+// Missing baseline history must not be treated as proof of customer creation.
+result = run(['sn_sec_cmn'], selectionData);
+assert.match(result.text, /record: marker-only \| origin: Unknown origin/);
+assert.match(result.text, /record: updated-custom \| origin: Unknown origin/);
+assert.match(result.text, /record: new-custom \| origin: Likely customer-created/);
+for (const missingFields of [{ sys_update_version: ['source_table'] }, { sys_update_version: ['name'] }]) {
+    result = run(['sn_sec_cmn'], selectionData, [], missingFields);
+    assert.match(result.text, /record: changed-oob \| origin: Unknown origin \(version metadata unavailable\)/);
+    assert.ok(!result.queries.some(q => q.table === 'sys_update_version'));
+}
+result = run(['sn_sec_cmn'], selectionData, ['sys_update_version']);
+assert.match(result.text, /record: new-custom \| origin: Unknown origin \(version metadata unavailable\)/);
+result = run(['sn_sec_cmn'], selectionData, [], {}, ['sys_update_version']);
+assert.match(result.text, /record: new-custom \| origin: Unknown origin \(lookup failed\)/);
+// Scheduled-job warnings retain record identity and origin too.
+result = run(['sn_vul'], { ...reportData, sysauto_script: [record('job-b', 'scope-b', '', { active: '1' })] });
+assert.match(result.text, /record: job-b \| origin: Unknown origin.*Active scheduled job has no Run as user/);
+console.log('Passed: selection and output regressions, application headers and grouping, origin on all finding types, delivery baseline precedence, insert evidence, and unknown origin handling.');

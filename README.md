@@ -8,13 +8,33 @@ var appNames = ['sn_sec_cmn'];
 var appNames = ['sn_sec_cmn', 'sn_vul'];
 ```
 
-Run the script as an administrator in your ServiceNow server-side script environment with read access to the selected scopes and Customer Updates metadata. Each application is queried and reported separately. Blank entries and repeated scope names are ignored. Missing or ambiguous scope names are reported and skipped without stopping other applications.
+Run the script as an administrator in your ServiceNow server-side script environment with read access to the selected scopes and Customer Updates metadata. Each application is queried and reported separately under a header containing its scope name and scope sys_id. All findings below that header belong to that application, until the next application header. Blank entries and repeated scope names are ignored. Missing or ambiguous scope names are reported and skipped without stopping other applications.
 
 Only tables with findings and nonzero finding counts appear in the results. Empty detail sections are omitted. An application with no findings gets a short `No findings.` message. Skipped-table notices and warnings remain visible because those checks may be incomplete.
 
 The existing checks are preserved: hard-coded sys_ids, `gs.info()`, variables beginning with `gr`, Business Rule `current.update()`, and active scheduled jobs with inactive Run as users. These are static pattern checks, so matches require review. Within those five tables, the scan includes customer-created files and customer-modified OOB files. It accepts a true `sys_customer_update` marker or a matching local `sys_update_xml` record in the `customer` category whose latest action is `INSERT`, `UPDATE`, or `INSERT_OR_UPDATE`. Lookup uses `sys_update_name` when available, otherwise `<record class/table>_<sys_id>`. Merely having version history, a high modification count, or a particular creator does not qualify a record.
 
 Retrieved/preview-only updates, internal updates, and deletion-only evidence do not qualify. Committed remote update sets are represented by their local copies. The scan stops with a short message if the required Customer Updates table or fields are unavailable.
+
+Each finding includes the record sys_id and an `origin` label:
+
+- `Customized OOB/Store file (delivery baseline)`: customer-change evidence plus an exact-name version with `source_table` equal to `sys_upgrade_history` or `sys_store_app`. This groups platform and Store-delivered files; it does not assert who authored a Store app.
+- `Likely customer-created (insert evidence)`: no delivery baseline was found, and an explicit local customer `INSERT` exists. This is an inference, not proof of authorship.
+- `Unknown origin`: customer-change evidence exists, but origin cannot be established from available history. Missing version metadata also produces this label. `INSERT_OR_UPDATE`, creator names, and the absence of a baseline alone do not prove a file was created by your team.
+
+Origin labels annotate findings; they do not change which records are scanned. Incomplete or purged history can limit classification. ServiceNow documents the baseline and version-source concepts in [Version records](https://www.servicenow.com/docs/r/application-development/team-development/r_VersionRecords.html). The `source_table` delivery checks also appear in this [ServiceNow Community author's implementation](https://www.servicenow.com/community/developer-articles/my-collected-list-of-useful-business-rules/ta-p/2467239).
+
+Example layout (placeholder IDs):
+
+```text
+Application: sn_sec_cmn | Scope sys_id: <application_sys_id> | Records scanned: 2
+sys_script | gs.info(): 1
+gs.info():
+  sys_script | Example rule | record: <record_sys_id> | origin: Customized OOB/Store file (delivery baseline) | gs.info() occurrences: 1
+
+Application: sn_vul | Scope sys_id: <other_application_sys_id> | Records scanned: 1
+No findings.
+```
 
 This is a customer-change metadata filter, not a byte-for-byte comparison with the OOB baseline or an audit of who authored each file. Files imported without change tracking, or with removed tracking metadata and no customer-update marker, cannot be reliably identified and are excluded. A reverted file with retained customer-change evidence can still qualify; confirm it against the baseline when reviewing findings.
 

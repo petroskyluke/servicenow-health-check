@@ -173,6 +173,9 @@
 
                 var recordLabel = getRecordLabel(recordGR);
                 var recordId = recordGR.getUniqueValue();
+                var recordContext = tableName + ' | ' + recordLabel +
+                    ' | record: ' + recordId +
+                    ' | origin: ' + getRecordOrigin(recordGR, tableName);
 
                 /*
                  * Scheduled job validation does not depend only on the
@@ -182,8 +185,7 @@
                     checkScheduledJob(
                         recordGR,
                         tableName,
-                        recordLabel,
-                        recordId,
+                        recordContext,
                         results,
                         details,
                         grandTotals
@@ -224,9 +226,7 @@
                     }
 
                     details.sysIds.push(
-                        tableName +
-                        ' | ' + recordLabel +
-                        ' | record: ' + recordId +
+                        recordContext +
                         ' | occurrences: ' + sysIdMatches.length +
                         ' | unique in record: ' + normalizedSysIds.length +
                         ' | values: ' + normalizedSysIds.join(', ')
@@ -246,9 +246,7 @@
                     grandTotals.recordsWithGsInfo++;
 
                     details.gsInfo.push(
-                        tableName +
-                        ' | ' + recordLabel +
-                        ' | record: ' + recordId +
+                        recordContext +
                         ' | gs.info() occurrences: ' + gsInfoMatches.length
                     );
                 }
@@ -285,9 +283,7 @@
                     grandTotals.recordsWithGrVariables++;
 
                     details.grVariables.push(
-                        tableName +
-                        ' | ' + recordLabel +
-                        ' | record: ' + recordId +
+                        recordContext +
                         ' | declarations: ' + grVariableOccurrences +
                         ' | unique variables: ' + recordVariableNames.length +
                         ' | names: ' + recordVariableNames.join(', ')
@@ -312,9 +308,7 @@
                         grandTotals.businessRulesWithCurrentUpdate++;
 
                         details.currentUpdate.push(
-                            tableName +
-                            ' | ' + recordLabel +
-                            ' | record: ' + recordId +
+                            recordContext +
                             ' | current.update() occurrences: ' +
                             currentUpdateMatches.length +
                             ' | active: ' + getFieldValue(recordGR, 'active') +
@@ -329,7 +323,9 @@
         /********************************************************************
          * OUTPUT: omit empty tables, zero counters, and empty detail sections.
          ********************************************************************/
-        gs.print('Application: ' + appName + ' | Records scanned: ' + grandTotals.recordsScanned);
+        gs.print('');
+        gs.print('Application: ' + appName + ' | Scope sys_id: ' + scopeId +
+            ' | Records scanned: ' + grandTotals.recordsScanned);
 
         var hasFindings = false;
         for (var t = 0; t < tables.length; t++) {
@@ -369,16 +365,14 @@
     function checkScheduledJob(
         jobGR,
         tableName,
-        recordLabel,
-        recordId,
+        recordContext,
         allResults,
         allDetails,
         totals
     ) {
         if (!jobGR.isValidField('active')) {
             allDetails.warnings.push(
-                tableName +
-                ' | ' + recordLabel +
+                recordContext +
                 ' | active field is not available.'
             );
             return;
@@ -390,8 +384,7 @@
 
         if (!jobGR.isValidField('run_as')) {
             allDetails.warnings.push(
-                tableName +
-                ' | ' + recordLabel +
+                recordContext +
                 ' | run_as field is not available.'
             );
             return;
@@ -405,9 +398,7 @@
          */
         if (!runAsUserId) {
             allDetails.warnings.push(
-                tableName +
-                ' | ' + recordLabel +
-                ' | record: ' + recordId +
+                recordContext +
                 ' | Active scheduled job has no Run as user.'
             );
             return;
@@ -417,9 +408,7 @@
 
         if (!userGR.get(runAsUserId)) {
             allDetails.warnings.push(
-                tableName +
-                ' | ' + recordLabel +
-                ' | record: ' + recordId +
+                recordContext +
                 ' | Run as user record was not found: ' + runAsUserId
             );
             return;
@@ -430,9 +419,7 @@
             totals.activeJobsRunByInactiveUsers++;
 
             allDetails.inactiveRunAs.push(
-                tableName +
-                ' | ' + recordLabel +
-                ' | record: ' + recordId +
+                recordContext +
                 ' | Run as user: ' + userGR.getDisplayValue() +
                 ' | user sys_id: ' + runAsUserId +
                 ' | user active: false'
@@ -510,15 +497,7 @@
             }
         }
 
-        // Both newly created and modified OOB files are captured as customer updates.
-        // The update name is normally <table>_<sys_id>, not a bare sys_id.
-        var updateName = recordGR.isValidField('sys_update_name')
-            ? recordGR.getValue('sys_update_name') : '';
-        if (!updateName) {
-            var recordClass = recordGR.isValidField('sys_class_name')
-                ? recordGR.getValue('sys_class_name') : '';
-            updateName = (recordClass || tableName) + '_' + recordGR.getUniqueValue();
-        }
+        var updateName = getUpdateName(recordGR, tableName);
 
         var updateGR = new GlideRecord('sys_update_xml');
         updateGR.addQuery('name', updateName);
@@ -536,6 +515,63 @@
         }
         var action = updateGR.getValue('action');
         return action == 'INSERT' || action == 'UPDATE' || action == 'INSERT_OR_UPDATE';
+    }
+
+    function getUpdateName(recordGR, tableName) {
+        // Both newly created and modified OOB files are captured as customer updates.
+        // The update name is normally <table>_<sys_id>, not a bare sys_id.
+        var updateName = recordGR.isValidField('sys_update_name')
+            ? recordGR.getValue('sys_update_name') : '';
+        if (!updateName) {
+            var recordClass = recordGR.isValidField('sys_class_name')
+                ? recordGR.getValue('sys_class_name') : '';
+            updateName = (recordClass || tableName) + '_' + recordGR.getUniqueValue();
+        }
+
+        return updateName;
+    }
+
+    function getRecordOrigin(recordGR, tableName) {
+        try {
+            return lookupRecordOrigin(recordGR, tableName);
+        } catch (error) {
+            // Origin is supplemental: keep the finding if version access fails.
+            return 'Unknown origin (lookup failed)';
+        }
+    }
+
+    function lookupRecordOrigin(recordGR, tableName) {
+        var updateName = getUpdateName(recordGR, tableName);
+        var versionGR = new GlideRecord('sys_update_version');
+        if (!versionGR.isValid() || !versionGR.isValidField('name') ||
+                !versionGR.isValidField('source_table')) {
+            return 'Unknown origin (version metadata unavailable)';
+        }
+
+        // Positive delivery evidence; absence of a baseline alone does not prove
+        // customer authorship. Do not use localized source display labels.
+        versionGR.addQuery('name', updateName);
+        versionGR.addQuery('source_table', 'IN', 'sys_upgrade_history,sys_store_app');
+        versionGR.setLimit(1);
+        versionGR.query();
+        if (versionGR.next()) {
+            return 'Customized OOB/Store file (delivery baseline)';
+        }
+
+        var updateGR = new GlideRecord('sys_update_xml');
+        updateGR.addQuery('name', updateName);
+        updateGR.addQuery('category', 'customer');
+        updateGR.addQuery('action', 'INSERT');
+        updateGR.addNotNullQuery('update_set');
+        updateGR.addNullQuery('remote_update_set');
+        updateGR.setLimit(1);
+        updateGR.query();
+        if (updateGR.next()) {
+            return 'Likely customer-created (insert evidence)';
+        }
+
+        // INSERT_OR_UPDATE is used for both OOB edits and custom creation.
+        return 'Unknown origin (customer change confirmed)';
     }
 
     function objectKeys(object) {
