@@ -41,6 +41,12 @@
 
     var seenApps = {};
     var applicationsScanned = 0;
+    var customerUpdateLookupAvailable = hasCustomerUpdateMetadata();
+
+    if (!customerUpdateLookupAvailable) {
+        gs.print('Scan stopped: customer-update metadata is unavailable; cannot safely select custom records.');
+        return;
+    }
 
     for (var appIndex = 0; appIndex < appNames.length; appIndex++) {
         var appName = String(appNames[appIndex] || '').replace(/^\s+|\s+$/g, '');
@@ -158,8 +164,8 @@
 
             while (recordGR.next()) {
 
-                // Skip records that have never been customized
-                if (!isCustomized(recordGR))
+                // Include customer-created files and customer-modified OOB files only.
+                if (!isCustomerCreatedOrModified(recordGR, tableName))
                     continue;
 
                 results[tableName].recordsScanned++;
@@ -480,15 +486,56 @@
         return value;
     }
 
-    function isCustomized(recordGR) {
-        var metadataId = recordGR.getUniqueValue();
+    function hasCustomerUpdateMetadata() {
+        var updateGR = new GlideRecord('sys_update_xml');
+        var requiredFields = ['name', 'category', 'action', 'update_set', 'remote_update_set'];
+        if (!updateGR.isValid()) {
+            return false;
+        }
+        for (var i = 0; i < requiredFields.length; i++) {
+            if (!updateGR.isValidField(requiredFields[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
 
-        var versionGR = new GlideRecord('sys_update_version');
-        versionGR.addQuery('name', metadataId);
-        versionGR.setLimit(1);
-        versionGR.query();
+    function isCustomerCreatedOrModified(recordGR, tableName) {
+        // Use the platform's customer-update marker when exposed on the record.
+        // Do not infer ownership from creator names, dates, or modification counts.
+        if (recordGR.isValidField('sys_customer_update')) {
+            var customerUpdate = recordGR.getValue('sys_customer_update');
+            if (customerUpdate == '1' || customerUpdate == 'true') {
+                return true;
+            }
+        }
 
-        return versionGR.hasNext();
+        // Both newly created and modified OOB files are captured as customer updates.
+        // The update name is normally <table>_<sys_id>, not a bare sys_id.
+        var updateName = recordGR.isValidField('sys_update_name')
+            ? recordGR.getValue('sys_update_name') : '';
+        if (!updateName) {
+            var recordClass = recordGR.isValidField('sys_class_name')
+                ? recordGR.getValue('sys_class_name') : '';
+            updateName = (recordClass || tableName) + '_' + recordGR.getUniqueValue();
+        }
+
+        var updateGR = new GlideRecord('sys_update_xml');
+        updateGR.addQuery('name', updateName);
+        updateGR.addQuery('category', 'customer');
+        // Retrieved/previewed updates are not evidence of a local customization.
+        // Committed remote updates have a local update-set copy.
+        updateGR.addNotNullQuery('update_set');
+        updateGR.addNullQuery('remote_update_set');
+        updateGR.orderByDesc('sys_updated_on');
+        updateGR.setLimit(1);
+        updateGR.query();
+
+        if (!updateGR.next()) {
+            return false;
+        }
+        var action = updateGR.getValue('action');
+        return action == 'INSERT' || action == 'UPDATE' || action == 'INSERT_OR_UPDATE';
     }
 
     function objectKeys(object) {

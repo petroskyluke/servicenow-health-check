@@ -10,10 +10,20 @@ function run(apps, data = {}, invalid = [], missingFields = {}) {
     class GlideRecord {
         constructor(table) { this.table = table; this.filters = []; this.rows = []; this.index = -1; this.limit = Infinity; }
         addQuery(field, value) { this.filters.push([field, value]); }
+        addNotNullQuery(field) { this.filters.push([field, 'NOT_NULL']); }
+        addNullQuery(field) { this.filters.push([field, 'NULL']); }
+        orderByDesc(field) { this.sortField = field; }
         setLimit(limit) { this.limit = limit; }
         query() {
             queries.push({ table: this.table, filters: this.filters });
-            this.rows = (data[this.table] || []).filter(row => this.filters.every(([k, v]) => row[k] === v)).slice(0, this.limit);
+            for (const [field] of this.filters) assert.ok(this.isValidField(field), 'Invalid query field: ' + field);
+            this.rows = (data[this.table] || []).filter(row => this.filters.every(([k, v]) => {
+                if (v === 'NOT_NULL') return row[k] != null && row[k] !== '';
+                if (v === 'NULL') return row[k] == null || row[k] === '';
+                return row[k] === v;
+            }));
+            if (this.sortField) this.rows.sort((a, b) => String(b[this.sortField] || '').localeCompare(String(a[this.sortField] || '')));
+            this.rows = this.rows.slice(0, this.limit);
         }
         next() { return ++this.index < this.rows.length; }
         hasNext() { return this.index + 1 < this.rows.length; }
@@ -34,6 +44,7 @@ const scopes = [
     { sys_id: 'scope-b', scope: 'sn_vul', name: 'Vulnerability Response' }
 ];
 const record = (sys_id, sys_scope, script, extra = {}) => ({ sys_id, sys_scope, name: sys_id, script, ...extra });
+const update = (name, extra = {}) => ({ name, category: 'customer', action: 'INSERT_OR_UPDATE', update_set: 'local-set', sys_updated_on: '2026-09-24 10:00:00', ...extra });
 const data = {
     sys_scope: scopes,
     sys_script: [record('rule-a', 'scope-a', 'gs.info("a"); current.update();'), record('rule-b', 'scope-b', 'gs.info("b"); gs.info("c");'), record('foreign', 'other', 'gs.info("outside");')],
@@ -41,7 +52,7 @@ const data = {
     sys_script_include: [record('include-b', 'scope-b', 'var grTask; var id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";')],
     sysauto_script: [record('job-b', 'scope-b', '', { active: '1', run_as: 'inactive' })],
     sys_user: [{ sys_id: 'inactive', name: 'Inactive User', active: '0' }],
-    sys_update_version: ['rule-a', 'rule-b', 'foreign', 'clean', 'include-b', 'job-b'].map(name => ({ name }))
+    sys_update_xml: ['sys_script_rule-a', 'sys_script_rule-b', 'sys_script_foreign', 'sys_script_client_clean', 'sys_script_include_include-b', 'sysauto_script_job-b'].map(name => update(name))
 };
 let result = run([' sn_sec_cmn ', 'missing', 'sn_vul', 'sn_sec_cmn', ''], data);
 assert.equal((result.text.match(/Application: sn_sec_cmn/g) || []).length, 1);
@@ -69,4 +80,75 @@ assert.match(result.text, /No applications scanned/);
 result = run(['sn_vul'], { ...data, sysauto_script: [record('job-b', 'scope-b', '', { active: '1' })] });
 assert.match(result.text, /Warnings:/);
 assert.match(result.text, /Active scheduled job has no Run as user/);
-console.log('Passed: scope lookup, multiple applications, isolation, duplicate/missing scopes, empty output, all finding types, customization filter, skipped tables, and warnings.');
+// Original behavior remains covered above. Customer/OOB selection cases follow.
+
+const selectionData = {
+    sys_scope: scopes,
+    sys_script_include: [
+        record('changed-oob', 'scope-a', 'gs.info("changed");'),
+        record('new-custom', 'scope-a', 'gs.info("new");', { sys_mod_count: '0', sys_created_by: 'admin' }),
+        record('updated-custom', 'scope-a', 'gs.info("update");'),
+        record('marker-only', 'scope-a', 'gs.info("marked");', { sys_customer_update: 'true' }),
+        record('marker-one', 'scope-a', 'gs.info("marked");', { sys_customer_update: '1' }),
+        record('untouched-oob', 'scope-a', 'gs.info("stock");', { sys_customer_update: 'false', sys_mod_count: '99', sys_created_by: 'developer' }),
+        record('bare-id', 'scope-a', 'gs.info("wrong key");'),
+        record('wrong-table', 'scope-a', 'gs.info("wrong table");'),
+        record('internal-only', 'scope-a', 'gs.info("internal");'),
+        record('preview-only', 'scope-a', 'gs.info("not committed");'),
+        record('delete-only', 'scope-a', 'gs.info("deleted");'),
+        record('latest-delete', 'scope-a', 'gs.info("old customization");'),
+        record('orphan-update', 'scope-a', 'gs.info("orphan");'),
+        record('promoted-custom', 'scope-a', 'gs.info("committed");'),
+        record('explicit-name', 'scope-a', 'gs.info("update name");', { sys_update_name: 'sys_script_include_real-update-name' }),
+        record('subclass', 'scope-a', 'gs.info("subclass");', { sys_class_name: 'custom_script_include' }),
+        record('outside', 'scope-b', 'gs.info("outside");', { sys_customer_update: 'true' })
+    ],
+    sys_update_xml: [
+        update('sys_script_include_changed-oob'),
+        update('sys_script_include_new-custom', { action: 'INSERT' }),
+        update('sys_script_include_updated-custom', { action: 'UPDATE' }),
+        update('bare-id'),
+        update('sys_script_wrong-table'),
+        update('sys_script_include_internal-only', { category: 'internal' }),
+        update('sys_script_include_preview-only', { remote_update_set: 'retrieved', update_set: '' }),
+        update('sys_script_include_delete-only', { action: 'DELETE' }),
+        update('sys_script_include_latest-delete'),
+        update('sys_script_include_latest-delete', { action: 'DELETE', sys_updated_on: '2026-09-24 11:00:00' }),
+        update('sys_script_include_orphan-update', { update_set: '' }),
+        update('sys_script_include_promoted-custom', { remote_update_set: 'committed-remote', update_set: '' }),
+        update('sys_script_include_promoted-custom', { update_set: 'local-committed-copy' }),
+        update('sys_script_include_real-update-name'),
+        update('custom_script_include_subclass')
+    ],
+    // A baseline, plugin version, or old customer version does not qualify a record.
+    sys_update_version: [
+        { name: 'untouched-oob', state: 'CURRENT' },
+        { name: 'sys_script_include_untouched-oob', state: 'CURRENT', source: 'System Upgrade' },
+        { name: 'sys_script_include_untouched-oob', state: 'PREVIOUS', source: 'Update Set' },
+        { name: 'sys_script_include_changed-oob', state: 'HISTORY', source: 'System Upgrade' }
+    ]
+};
+result = run(['sn_sec_cmn'], selectionData);
+for (const id of ['changed-oob', 'new-custom', 'updated-custom', 'marker-only', 'marker-one', 'promoted-custom', 'explicit-name', 'subclass']) {
+    assert.ok(result.text.includes(' | record: ' + id + ' |'), 'Expected included record: ' + id);
+}
+for (const id of ['untouched-oob', 'bare-id', 'wrong-table', 'internal-only', 'preview-only', 'delete-only', 'latest-delete', 'orphan-update', 'outside']) {
+    assert.ok(!result.text.includes(' | record: ' + id + ' |'), 'Expected excluded record: ' + id);
+}
+assert.match(result.text, /Records scanned: 8/);
+assert.ok(!result.queries.some(q => q.table === 'sys_update_version'));
+// Missing virtual metadata fields still permit the exact table + sys_id lookup.
+result = run(['sn_sec_cmn'], selectionData, [], { sys_script_include: ['sys_customer_update', 'sys_update_name', 'sys_class_name'] });
+assert.match(result.text, /record: new-custom/);
+assert.doesNotMatch(result.text, /record: untouched-oob/);
+// Stop if required selection metadata is unavailable, never broaden the scan.
+for (const field of ['name', 'category', 'action', 'update_set', 'remote_update_set']) {
+    result = run(['sn_sec_cmn'], selectionData, [], { sys_update_xml: [field] });
+    assert.match(result.text, /Scan stopped:/);
+    assert.doesNotMatch(result.text, /No findings/);
+    assert.equal(result.queries.length, 0);
+}
+result = run(['sn_sec_cmn'], selectionData, ['sys_update_xml']);
+assert.match(result.text, /Scan stopped:/);
+assert.equal(result.queries.length, 0);
+console.log('Passed: scope selection, multiple apps, all finding types, concise output, custom inserts, customized OOB, untouched OOB exclusion, exact update names, applied updates, deletion filtering, and unavailable metadata.');
