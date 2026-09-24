@@ -25,18 +25,16 @@
      * Finds gs.info( calls, with optional whitespace.
      *
      * grVariableRegex:
-     * Finds declared variables whose names begin with "gr".
-     * Examples:
-     *   var grIncident
-     *   let grTask
-     *   const grUser
+     * Finds declarations named exactly "gr" (case-insensitive).
+     * Flags var gr, let GR, const Gr; allows grMembers, grTask, gr1, gr$.
+     * This check also runs on untouched OOB records in the selected scopes.
      *
      * currentUpdateRegex:
      * Finds current.update( calls.
      */
     var sysIdRegex = /\b[a-f0-9]{32}\b/gi;
     var gsInfoRegex = /\bgs\s*\.\s*info\s*\(/gi;
-    var grVariableRegex = /\b(?:var|let|const)\s+(gr[A-Za-z0-9_$]*)\b/g;
+    var grVariableRegex = /\b(?:var|let|const)\s+(gr)(?![A-Za-z0-9_$\u0080-\uFFFF])/gi;
     var currentUpdateRegex = /\bcurrent\s*\.\s*update\s*\(/gi;
 
     var seenApps = {};
@@ -164,24 +162,30 @@
 
             while (recordGR.next()) {
 
-                // Include customer-created files and customer-modified OOB files only.
-                if (!isCustomerCreatedOrModified(recordGR, tableName))
-                    continue;
-
+                // Exact-gr applies to every record in scope. Other checks retain
+                // their customer-created/customer-modified selection.
+                var customerChanged = isCustomerCreatedOrModified(recordGR, tableName);
+                var script = recordGR.isValidField('script')
+                    ? (recordGR.getValue('script') || '') : '';
+                var grMatches = script.match(grVariableRegex) || [];
                 results[tableName].recordsScanned++;
                 grandTotals.recordsScanned++;
+                if (!customerChanged && grMatches.length === 0) {
+                    continue;
+                }
 
+                var recordOrigin = getRecordOrigin(recordGR, tableName, customerChanged);
                 var recordLabel = getRecordLabel(recordGR);
                 var recordId = recordGR.getUniqueValue();
                 var recordContext = tableName + ' | ' + recordLabel +
                     ' | record: ' + recordId +
-                    ' | origin: ' + getRecordOrigin(recordGR, tableName);
+                    ' | origin: ' + recordOrigin;
 
                 /*
                  * Scheduled job validation does not depend only on the
                  * contents of the script field.
                  */
-                if (tableName == 'sysauto_script') {
+                if (customerChanged && tableName == 'sysauto_script') {
                     checkScheduledJob(
                         recordGR,
                         tableName,
@@ -196,12 +200,10 @@
                     continue;
                 }
 
-                var script = recordGR.getValue('script') || '';
-
                 /************************************************************
                  * HARD-CODED SYS_IDS
                  ************************************************************/
-                var sysIdMatches = script.match(sysIdRegex);
+                var sysIdMatches = customerChanged ? script.match(sysIdRegex) : null;
 
                 if (sysIdMatches && sysIdMatches.length > 0) {
                     var recordSysIds = {};
@@ -236,7 +238,7 @@
                 /************************************************************
                  * GS.INFO()
                  ************************************************************/
-                var gsInfoMatches = script.match(gsInfoRegex);
+                var gsInfoMatches = customerChanged ? script.match(gsInfoRegex) : null;
 
                 if (gsInfoMatches && gsInfoMatches.length > 0) {
                     results[tableName].gsInfoOccurrences += gsInfoMatches.length;
@@ -252,7 +254,7 @@
                 }
 
                 /************************************************************
-                 * VARIABLES BEGINNING WITH "gr"
+                 * VARIABLES NAMED EXACTLY "gr"
                  ************************************************************/
                 var recordGrVariables = {};
                 var grVariableOccurrences = 0;
@@ -282,10 +284,11 @@
                     grandTotals.grVariableOccurrences += grVariableOccurrences;
                     grandTotals.recordsWithGrVariables++;
 
+                    var grPriority = recordOrigin == 'UPMC custom' ? 'SEVERE' : 'LOW';
                     details.grVariables.push(
                         recordContext +
-                        ' | declarations: ' + grVariableOccurrences +
-                        ' | unique variables: ' + recordVariableNames.length +
+                        ' | priority: ' + grPriority +
+                        ' | exact-gr declarations: ' + grVariableOccurrences +
                         ' | names: ' + recordVariableNames.join(', ')
                     );
                 }
@@ -293,7 +296,7 @@
                 /************************************************************
                  * CURRENT.UPDATE() IN BUSINESS RULES
                  ************************************************************/
-                if (tableName == 'sys_script') {
+                if (customerChanged && tableName == 'sys_script') {
                     var currentUpdateMatches = script.match(currentUpdateRegex);
 
                     if (currentUpdateMatches && currentUpdateMatches.length > 0) {
@@ -334,7 +337,7 @@
             var counts = [];
             addCount(counts, 'hard-coded sys_ids', tableResult.sysIdOccurrences);
             addCount(counts, 'gs.info()', tableResult.gsInfoOccurrences);
-            addCount(counts, '"gr" declarations', tableResult.grVariableOccurrences);
+            addCount(counts, 'Exact "gr" declarations', tableResult.grVariableOccurrences);
             addCount(counts, 'current.update()', tableResult.currentUpdateOccurrences);
             addCount(counts, 'inactive Run as users', tableResult.activeJobsRunByInactiveUsers);
             if (counts.length === 0) {
@@ -346,7 +349,7 @@
 
         printDetailSection('Hard-coded sys_ids', details.sysIds);
         printDetailSection('gs.info()', details.gsInfo);
-        printDetailSection('"gr" declarations', details.grVariables);
+        printDetailSection('Exact "gr" declarations', details.grVariables);
         printDetailSection('current.update()', details.currentUpdate);
         printDetailSection('Inactive Run as users', details.inactiveRunAs);
         printDetailSection('Skipped tables', details.skippedTables);
@@ -531,47 +534,28 @@
         return updateName;
     }
 
-    function getRecordOrigin(recordGR, tableName) {
+    function getRecordOrigin(recordGR, tableName, customerChanged) {
+        // Per UPMC reporting policy, unresolved customer-changed origins are
+        // treated as UPMC custom. This is a reporting assumption, not proof
+        // of authorship. No tracked customer changes means OOB-only GR review.
+        var fallback = customerChanged ? 'UPMC custom' : 'OOB/Store (no customer changes tracked)';
         try {
-            return lookupRecordOrigin(recordGR, tableName);
+            var versionGR = new GlideRecord('sys_update_version');
+            if (!versionGR.isValid() || !versionGR.isValidField('name') ||
+                    !versionGR.isValidField('source_table')) {
+                return fallback;
+            }
+            versionGR.addQuery('name', getUpdateName(recordGR, tableName));
+            versionGR.addQuery('source_table', 'IN', 'sys_upgrade_history,sys_store_app');
+            versionGR.setLimit(1);
+            versionGR.query();
+            if (versionGR.next()) {
+                return customerChanged ? 'Customized OOB/Store file' : 'OOB/Store file';
+            }
         } catch (error) {
-            // Origin is supplemental: keep the finding if version access fails.
-            return 'Unknown origin (lookup failed)';
+            // Keep findings and apply the configured reporting policy.
         }
-    }
-
-    function lookupRecordOrigin(recordGR, tableName) {
-        var updateName = getUpdateName(recordGR, tableName);
-        var versionGR = new GlideRecord('sys_update_version');
-        if (!versionGR.isValid() || !versionGR.isValidField('name') ||
-                !versionGR.isValidField('source_table')) {
-            return 'Unknown origin (version metadata unavailable)';
-        }
-
-        // Positive delivery evidence; absence of a baseline alone does not prove
-        // customer authorship. Do not use localized source display labels.
-        versionGR.addQuery('name', updateName);
-        versionGR.addQuery('source_table', 'IN', 'sys_upgrade_history,sys_store_app');
-        versionGR.setLimit(1);
-        versionGR.query();
-        if (versionGR.next()) {
-            return 'Customized OOB/Store file (delivery baseline)';
-        }
-
-        var updateGR = new GlideRecord('sys_update_xml');
-        updateGR.addQuery('name', updateName);
-        updateGR.addQuery('category', 'customer');
-        updateGR.addQuery('action', 'INSERT');
-        updateGR.addNotNullQuery('update_set');
-        updateGR.addNullQuery('remote_update_set');
-        updateGR.setLimit(1);
-        updateGR.query();
-        if (updateGR.next()) {
-            return 'Likely customer-created (insert evidence)';
-        }
-
-        // INSERT_OR_UPDATE is used for both OOB edits and custom creation.
-        return 'Unknown origin (customer change confirmed)';
+        return fallback;
     }
 
     function objectKeys(object) {

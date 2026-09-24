@@ -53,7 +53,7 @@ const data = {
     sys_scope: scopes,
     sys_script: [record('rule-a', 'scope-a', 'gs.info("a"); current.update();'), record('rule-b', 'scope-b', 'gs.info("b"); gs.info("c");'), record('foreign', 'other', 'gs.info("outside");')],
     sys_script_client: [record('clean', 'scope-a', 'var value = 1;'), record('uncustomized', 'scope-a', 'gs.info("ignored");')],
-    sys_script_include: [record('include-b', 'scope-b', 'var grTask; var id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";')],
+    sys_script_include: [record('include-b', 'scope-b', 'var gr; var id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";')],
     sysauto_script: [record('job-b', 'scope-b', '', { active: '1', run_as: 'inactive' })],
     sys_user: [{ sys_id: 'inactive', name: 'Inactive User', active: '0' }],
     sys_update_xml: ['sys_script_rule-a', 'sys_script_rule-b', 'sys_script_foreign', 'sys_script_client_clean', 'sys_script_include_include-b', 'sysauto_script_job-b'].map(name => update(name))
@@ -64,7 +64,7 @@ assert.match(result.text, /Application not found: missing/);
 assert.match(result.text, /Application: sn_vul/);
 assert.match(result.text, /sys_script \| gs.info\(\): 1 \| current.update\(\): 1/);
 assert.match(result.text, /sys_script \| gs.info\(\): 2\n/);
-assert.match(result.text, /hard-coded sys_ids: 1 \| "gr" declarations: 1/);
+assert.match(result.text, /hard-coded sys_ids: 1 \| Exact "gr" declarations: 1/);
 assert.match(result.text, /inactive Run as users: 1/);
 assert.doesNotMatch(result.text, /foreign|uncustomized|sys_script_client|sys_ui_action|OVERALL SUMMARY/);
 assert.ok(result.queries.filter(q => q.table === 'sys_scope').every(q => q.filters[0][0] === 'scope'));
@@ -139,7 +139,7 @@ for (const id of ['changed-oob', 'new-custom', 'updated-custom', 'marker-only', 
 for (const id of ['untouched-oob', 'bare-id', 'wrong-table', 'internal-only', 'preview-only', 'delete-only', 'latest-delete', 'orphan-update', 'outside']) {
     assert.ok(!result.text.includes(' | record: ' + id + ' |'), 'Expected excluded record: ' + id);
 }
-assert.match(result.text, /Records scanned: 8/);
+assert.match(result.text, /Records scanned: 16/);
 assert.ok(result.queries.filter(q => q.table === 'sys_update_version').every(q => !q.filters.some(([k, v]) => k === 'name' && v === 'sys_script_include_untouched-oob')));
 // Missing virtual metadata fields still permit the exact table + sys_id lookup.
 result = run(['sn_sec_cmn'], selectionData, [], { sys_script_include: ['sys_customer_update', 'sys_update_name', 'sys_class_name'] });
@@ -177,8 +177,8 @@ assert.ok(result.text.slice(splitAt).includes('record: rule-b'));
 assert.ok(!result.text.slice(splitAt).includes('record: rule-a'));
 assert.match(result.text, /record: rule-a \| origin: Customized OOB\/Store file/);
 assert.match(result.text, /record: include-b \| origin: Customized OOB\/Store file/);
-assert.match(result.text, /record: rule-b \| origin: Likely customer-created \(insert evidence\)/);
-assert.match(result.text, /record: job-b \| origin: Unknown origin/);
+assert.match(result.text, /record: rule-b \| origin: UPMC custom/);
+assert.match(result.text, /record: job-b \| origin: UPMC custom/);
 assert.ok(result.text.split('\n').filter(line => line.includes(' | record: ')).every(line => line.includes(' | origin: ')));
 // Positive baseline evidence wins even if there is also an INSERT customer update.
 result = run(['sn_sec_cmn'], {
@@ -186,21 +186,71 @@ result = run(['sn_sec_cmn'], {
     sys_update_version: [...selectionData.sys_update_version, { name: 'sys_script_include_new-custom', source_table: 'sys_store_app' }]
 });
 assert.match(result.text, /record: new-custom \| origin: Customized OOB\/Store file/);
-// Missing baseline history must not be treated as proof of customer creation.
+// UPMC policy maps unresolved customer-changed records to UPMC custom.
 result = run(['sn_sec_cmn'], selectionData);
-assert.match(result.text, /record: marker-only \| origin: Unknown origin/);
-assert.match(result.text, /record: updated-custom \| origin: Unknown origin/);
-assert.match(result.text, /record: new-custom \| origin: Likely customer-created/);
+assert.match(result.text, /record: marker-only \| origin: UPMC custom/);
+assert.match(result.text, /record: updated-custom \| origin: UPMC custom/);
+assert.match(result.text, /record: new-custom \| origin: UPMC custom/);
 for (const missingFields of [{ sys_update_version: ['source_table'] }, { sys_update_version: ['name'] }]) {
     result = run(['sn_sec_cmn'], selectionData, [], missingFields);
-    assert.match(result.text, /record: changed-oob \| origin: Unknown origin \(version metadata unavailable\)/);
+    assert.match(result.text, /record: changed-oob \| origin: UPMC custom/);
     assert.ok(!result.queries.some(q => q.table === 'sys_update_version'));
 }
 result = run(['sn_sec_cmn'], selectionData, ['sys_update_version']);
-assert.match(result.text, /record: new-custom \| origin: Unknown origin \(version metadata unavailable\)/);
+assert.match(result.text, /record: new-custom \| origin: UPMC custom/);
 result = run(['sn_sec_cmn'], selectionData, [], {}, ['sys_update_version']);
-assert.match(result.text, /record: new-custom \| origin: Unknown origin \(lookup failed\)/);
+assert.match(result.text, /record: new-custom \| origin: UPMC custom/);
 // Scheduled-job warnings retain record identity and origin too.
 result = run(['sn_vul'], { ...reportData, sysauto_script: [record('job-b', 'scope-b', '', { active: '1' })] });
-assert.match(result.text, /record: job-b \| origin: Unknown origin.*Active scheduled job has no Run as user/);
-console.log('Passed: selection and output regressions, application headers and grouping, origin on all finding types, delivery baseline precedence, insert evidence, and unknown origin handling.');
+assert.match(result.text, /record: job-b \| origin: UPMC custom.*Active scheduled job has no Run as user/);
+
+
+// Exact names only, with priority based on UPMC vs delivered-file reporting origin.
+const grData = {
+    sys_scope: scopes,
+    sys_script_include: [
+        record('upmc-gr', 'scope-a', 'var gr; let GR; const Gr = 1; var gR = 2;', { sys_customer_update: 'true' }),
+        record('descriptive-names', 'scope-a', 'var grMembers; let GRMembers; const gr_task = 1; var gr1; var gr$; var grπ;', { sys_customer_update: 'true' }),
+        record('modified-oob-gr', 'scope-a', 'var gr;', { sys_customer_update: 'true' }),
+        record('untouched-oob-gr', 'scope-a', 'var gr; gs.info("stock"); var id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";'),
+        record('untouched-no-baseline', 'scope-a', 'var GR;'),
+        record('unknown-custom-gr', 'scope-a', 'var gr;'),
+        record('outside-scope-gr', 'scope-b', 'var gr;', { sys_customer_update: 'true' })
+    ],
+    sys_script: [record('oob-rule-gr', 'scope-a', 'var gr; current.update(); gs.info("stock");')],
+    sysauto_script: [record('oob-job-gr', 'scope-a', 'var gr;', { active: '1', run_as: 'inactive' })],
+    sys_user: [{ sys_id: 'inactive', active: '0' }],
+    sys_update_xml: [update('sys_script_include_unknown-custom-gr')],
+    sys_update_version: [
+        { name: 'sys_script_include_modified-oob-gr', source_table: 'sys_store_app' },
+        { name: 'sys_script_include_untouched-oob-gr', source_table: 'sys_upgrade_history' }
+    ]
+};
+result = run(['sn_sec_cmn'], grData);
+assert.match(result.text, /record: upmc-gr \| origin: UPMC custom \| priority: SEVERE \| exact-gr declarations: 4/);
+assert.match(result.text, /record: unknown-custom-gr \| origin: UPMC custom \| priority: SEVERE/);
+assert.match(result.text, /record: modified-oob-gr \| origin: Customized OOB\/Store file \| priority: LOW/);
+assert.match(result.text, /record: untouched-oob-gr \| origin: OOB\/Store file \| priority: LOW/);
+assert.match(result.text, /record: untouched-no-baseline \| origin: OOB\/Store \(no customer changes tracked\) \| priority: LOW/);
+assert.match(result.text, /record: oob-rule-gr .*priority: LOW/);
+assert.match(result.text, /record: oob-job-gr .*priority: LOW/);
+assert.doesNotMatch(result.text, /descriptive-names|outside-scope-gr|Unknown origin|origin review needed|Likely customer-created/);
+// The OOB exception must not pull any other findings or scheduled-job warnings in.
+assert.doesNotMatch(result.text, /Hard-coded sys_ids|gs.info\(\)|current.update\(\)|Inactive Run as users|Warnings:/);
+assert.ok(!result.queries.some(q => q.table === 'sys_user'));
+assert.match(result.text, /sys_script_include \| Exact "gr" declarations: 8/);
+assert.match(result.text, /Records scanned: 8/);
+// Descriptive names alone produce no table or finding section.
+result = run(['sn_sec_cmn'], {
+    sys_scope: scopes,
+    sys_script_include: [grData.sys_script_include[1]]
+});
+assert.equal(result.text, '\nApplication: sn_sec_cmn | Scope sys_id: scope-a | Records scanned: 1\nNo findings.');
+// Per-user origin fallback applies even if baseline metadata cannot be queried.
+result = run(['sn_sec_cmn'], grData, [], {}, ['sys_update_version']);
+assert.match(result.text, /record: modified-oob-gr \| origin: UPMC custom \| priority: SEVERE/);
+assert.match(result.text, /record: untouched-oob-gr .*priority: LOW/);
+// Both applications stay separate, including the newly broadened GR-only checks.
+result = run(['sn_sec_cmn', 'sn_vul'], grData);
+assert.ok(result.text.indexOf('record: outside-scope-gr') > result.text.indexOf(appBHeader));
+console.log('Passed: exact gr/GR matching, descriptive-name exclusions, severe UPMC findings, low-priority modified and untouched OOB findings, GR-only OOB expansion, reporting-origin policy, scope isolation, and previous checks.');
