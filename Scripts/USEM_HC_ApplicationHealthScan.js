@@ -27,7 +27,7 @@
      * grVariableRegex:
      * Finds declarations named exactly "gr" (case-insensitive).
      * Flags var gr, let GR, const Gr; allows grMembers, grTask, gr1, gr$.
-     * This check also runs on untouched OOB records in the selected scopes.
+     * Like every check, this excludes records with no customer changes.
      *
      * currentUpdateRegex:
      * Finds current.update( calls.
@@ -162,30 +162,31 @@
 
             while (recordGR.next()) {
 
-                // Exact-gr applies to every record in scope. Other checks retain
-                // their customer-created/customer-modified selection.
-                var customerChanged = isCustomerCreatedOrModified(recordGR, tableName);
-                var script = recordGR.isValidField('script')
-                    ? (recordGR.getValue('script') || '') : '';
-                var grMatches = script.match(grVariableRegex) || [];
-                results[tableName].recordsScanned++;
-                grandTotals.recordsScanned++;
-                if (!customerChanged && grMatches.length === 0) {
+                // Apply the same customer-record filter before every check.
+                // Untouched OOB records are excluded, including exact-gr matches.
+                if (!isCustomerCreatedOrModified(recordGR, tableName)) {
                     continue;
                 }
+                results[tableName].recordsScanned++;
+                grandTotals.recordsScanned++;
 
-                var recordOrigin = getRecordOrigin(recordGR, tableName, customerChanged);
+                var recordOrigin = getRecordOrigin(recordGR, tableName);
+                var recordPriority = recordOrigin == 'Custom Created' ? 'SEVERE' : 'LOW';
                 var recordLabel = getRecordLabel(recordGR);
                 var recordId = recordGR.getUniqueValue();
                 var recordContext = tableName + ' | ' + recordLabel +
                     ' | record: ' + recordId +
-                    ' | origin: ' + recordOrigin;
+                    ' | origin: ' + recordOrigin +
+                    ' | priority: ' + recordPriority;
+                if (recordPriority == 'LOW') {
+                    recordContext += ' | note: finding may be inherited from OOB';
+                }
 
                 /*
                  * Scheduled job validation does not depend only on the
                  * contents of the script field.
                  */
-                if (customerChanged && tableName == 'sysauto_script') {
+                if (tableName == 'sysauto_script') {
                     checkScheduledJob(
                         recordGR,
                         tableName,
@@ -200,10 +201,12 @@
                     continue;
                 }
 
+                var script = recordGR.getValue('script') || '';
+
                 /************************************************************
                  * HARD-CODED SYS_IDS
                  ************************************************************/
-                var sysIdMatches = customerChanged ? script.match(sysIdRegex) : null;
+                var sysIdMatches = script.match(sysIdRegex);
 
                 if (sysIdMatches && sysIdMatches.length > 0) {
                     var recordSysIds = {};
@@ -238,7 +241,7 @@
                 /************************************************************
                  * GS.INFO()
                  ************************************************************/
-                var gsInfoMatches = customerChanged ? script.match(gsInfoRegex) : null;
+                var gsInfoMatches = script.match(gsInfoRegex);
 
                 if (gsInfoMatches && gsInfoMatches.length > 0) {
                     results[tableName].gsInfoOccurrences += gsInfoMatches.length;
@@ -284,10 +287,8 @@
                     grandTotals.grVariableOccurrences += grVariableOccurrences;
                     grandTotals.recordsWithGrVariables++;
 
-                    var grPriority = recordOrigin == 'UPMC custom' ? 'SEVERE' : 'LOW';
                     details.grVariables.push(
                         recordContext +
-                        ' | priority: ' + grPriority +
                         ' | exact-gr declarations: ' + grVariableOccurrences +
                         ' | names: ' + recordVariableNames.join(', ')
                     );
@@ -296,7 +297,7 @@
                 /************************************************************
                  * CURRENT.UPDATE() IN BUSINESS RULES
                  ************************************************************/
-                if (customerChanged && tableName == 'sys_script') {
+                if (tableName == 'sys_script') {
                     var currentUpdateMatches = script.match(currentUpdateRegex);
 
                     if (currentUpdateMatches && currentUpdateMatches.length > 0) {
@@ -534,11 +535,11 @@
         return updateName;
     }
 
-    function getRecordOrigin(recordGR, tableName, customerChanged) {
-        // Per UPMC reporting policy, unresolved customer-changed origins are
-        // treated as UPMC custom. This is a reporting assumption, not proof
-        // of authorship. No tracked customer changes means OOB-only GR review.
-        var fallback = customerChanged ? 'UPMC custom' : 'OOB/Store (no customer changes tracked)';
+    function getRecordOrigin(recordGR, tableName) {
+        // Called only after customer-change evidence has been established.
+        // Per the requested reporting policy, missing delivery evidence means
+        // Custom Created. This is a reporting assumption, not proof of authorship.
+        var fallback = 'Custom Created';
         try {
             var versionGR = new GlideRecord('sys_update_version');
             if (!versionGR.isValid() || !versionGR.isValidField('name') ||
@@ -550,7 +551,7 @@
             versionGR.setLimit(1);
             versionGR.query();
             if (versionGR.next()) {
-                return customerChanged ? 'Customized OOB/Store file' : 'OOB/Store file';
+                return 'Customized OOB/Store file';
             }
         } catch (error) {
             // Keep findings and apply the configured reporting policy.
