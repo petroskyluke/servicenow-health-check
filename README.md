@@ -1,5 +1,7 @@
 # ServiceNow application health scan
 
+For the separate **single ATF test** that checks VIT risk-score and rating data, see [VR risk score and rating health](Scripts/ATF/README.md), or download its [importable XML update set](Scripts/ATF/VR_Risk_Data_Health_ATF.update-set.xml). It includes a shared editable configuration and all five server-side steps for your existing suite.
+
 Edit `appNames` near the top of `Scripts/USEM_HC_ApplicationHealthScan.js` with the application scope names (`sys_scope.scope`), not display labels:
 
 ```javascript

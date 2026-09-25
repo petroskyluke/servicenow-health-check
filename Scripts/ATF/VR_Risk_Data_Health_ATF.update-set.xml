@@ -1,0 +1,411 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<unload unload_date="2026-09-25 00:00:00">
+  <sys_remote_update_set action="INSERT_OR_UPDATE">
+    <sys_id>f55f6ed39e36f6d00e28d889028b242a</sys_id>
+    <name>VR - Risk score and rating health</name>
+    <description>One Global ATF test, five Run Server Side Script steps and VRRiskDataHealth. Configure percentage ranges before running; add to an existing suite. Reads VIT data only.</description>
+    <application>global</application>
+    <application_name>Global</application_name>
+    <application_scope>global</application_scope>
+    <remote_sys_id>c286701b292876b21a14eed0cb1e069a</remote_sys_id>
+    <state>loaded</state>
+    <sys_created_by>repository</sys_created_by>
+    <sys_updated_by>repository</sys_updated_by>
+    <sys_created_on>2026-09-25 00:00:00</sys_created_on>
+    <sys_updated_on>2026-09-25 00:00:00</sys_updated_on>
+    <sys_mod_count>0</sys_mod_count>
+  </sys_remote_update_set>
+  <sys_update_xml action="INSERT_OR_UPDATE">
+    <sys_id>3226b8a18a4f962dc1e80e4c59cdb3df</sys_id>
+    <action>INSERT_OR_UPDATE</action>
+    <application>global</application>
+    <category>customer</category>
+    <name>sys_script_include_bc3234330596f5642f6e15ff1c268b4f</name>
+    <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_script_include"&gt;&lt;sys_script_include action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;bc3234330596f5642f6e15ff1c268b4f&lt;/sys_id&gt;&lt;sys_class_name&gt;sys_script_include&lt;/sys_class_name&gt;&lt;sys_name&gt;VRRiskDataHealth&lt;/sys_name&gt;&lt;sys_update_name&gt;sys_script_include_bc3234330596f5642f6e15ff1c268b4f&lt;/sys_update_name&gt;&lt;sys_customer_update&gt;true&lt;/sys_customer_update&gt;&lt;sys_replace_on_upgrade&gt;false&lt;/sys_replace_on_upgrade&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_created_by&gt;repository&lt;/sys_created_by&gt;&lt;sys_updated_by&gt;repository&lt;/sys_updated_by&gt;&lt;sys_created_on&gt;2026-09-25 00:00:00&lt;/sys_created_on&gt;&lt;sys_updated_on&gt;2026-09-25 00:00:00&lt;/sys_updated_on&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;name&gt;VRRiskDataHealth&lt;/name&gt;&lt;api_name&gt;global.VRRiskDataHealth&lt;/api_name&gt;&lt;active&gt;true&lt;/active&gt;&lt;access&gt;package_private&lt;/access&gt;&lt;client_callable&gt;false&lt;/client_callable&gt;&lt;description&gt;Read-only VIT risk score/rating ATF health checks. Edit configuration in initialize before running.&lt;/description&gt;&lt;script&gt;/*
+ * Global, server-only Script Include: VRRiskDataHealth
+ * One ATF test uses this helper from the five scripts in steps/.
+ * Reads existing VITs only; never updates records or recalculates risk.
+ * Setup and sources: README.md in this directory.
+ */
+var VRRiskDataHealth = Class.create();
+VRRiskDataHealth.prototype = {
+    initialize: function() {
+        /**************************************************************
+         * EDIT THESE SETTINGS BEFORE RUNNING THE ATF TEST.
+         * Percentage ranges are deliberately unset, not recommendations.
+         * Use a verified healthy population to decide acceptable ranges.
+         **************************************************************/
+        this.config = {
+            configurationReviewed: false, // Set true after reviewing ALL settings.
+            table: 'sn_vul_vulnerable_item',
+            scoreField: 'risk_score',
+            ratingField: 'risk_rating',
+            populationLabel: 'Active VITs',
+            // Direct fields only; all conditions are ANDed. Use stored values.
+            filters: [
+                { field: 'active', operator: '=', value: true }
+                // Example: { field: 'source', operator: '=', value: 'YOUR_SOURCE' }
+            ],
+            minimumRecords: 100, // Choose a meaningful minimum for this population.
+            // Integer score domain and rating bands must match YOUR instance.
+            scoreMinimum: 0,
+            scoreMaximum: 100,
+            ratings: [
+                { value: '1', label: 'Critical', scoreMin: 90, scoreMax: 100, minPercent: null, maxPercent: null },
+                { value: '2', label: 'High',     scoreMin: 70, scoreMax: 89,  minPercent: null, maxPercent: null },
+                { value: '3', label: 'Medium',   scoreMin: 40, scoreMax: 69,  minPercent: null, maxPercent: null },
+                { value: '4', label: 'Low',      scoreMin: 1,  scoreMax: 39,  minPercent: null, maxPercent: null },
+                { value: '5', label: 'None',     scoreMin: 0,  scoreMax: 0,   minPercent: null, maxPercent: null }
+            ],
+            // Optional: helps catch lower scores even within the same rating.
+            // Both null disables this extra check; otherwise set BOTH bounds.
+            meanScore: { min: null, max: null }
+        };
+    },
+
+    run: function(check) {
+        try {
+            if (['configuration', 'population', 'values', 'consistency', 'distribution'].indexOf(check) &amp;lt; 0)
+                throw new Error('Unknown check: ' + check);
+            this._validateConfiguration();
+            if (check === 'configuration')
+                return { passed: true, message: 'Pass | Configuration and fields validated.' };
+
+            var snapshot = this._readSnapshot();
+            var prefix = this.config.populationLabel + ' | VITs: ' + snapshot.total;
+            if (snapshot.total &amp;lt; this.config.minimumRecords)
+                return { passed: false, message: 'Fail | ' + prefix + ' | Insufficient data; minimum: ' + this.config.minimumRecords };
+            if (check === 'population')
+                return { passed: true, message: 'Pass | ' + prefix };
+
+            var valueFailures = [];
+            if (snapshot.invalidScores) valueFailures.push('Missing/invalid scores: ' + snapshot.invalidScores);
+            if (snapshot.invalidRatings) valueFailures.push('Missing/invalid ratings: ' + snapshot.invalidRatings);
+            // Never calculate a healthy distribution by silently dropping bad data.
+            if (valueFailures.length)
+                return { passed: false, message: 'Fail | ' + prefix + ' | ' + valueFailures.join(' | ') };
+            if (check === 'values')
+                return { passed: true, message: 'Pass | ' + prefix + ' | Scores and ratings valid.' };
+
+            if (snapshot.mismatches)
+                return { passed: false, message: 'Fail | ' + prefix + ' | Score/rating mismatches: ' + snapshot.mismatches };
+            if (check === 'consistency')
+                return { passed: true, message: 'Pass | ' + prefix + ' | Score/rating bands match.' };
+
+            var failures = [];
+            var percentages = [];
+            for (var i = 0; i &amp;lt; this.config.ratings.length; i++) {
+                var rating = this.config.ratings[i];
+                var percent = 100 * snapshot.ratingCounts[i] / snapshot.total;
+                percentages.push(rating.label + ': ' + percent.toFixed(2) + '%');
+                // Compare full precision; rounding is for display only.
+                if (percent &amp;lt; rating.minPercent || percent &amp;gt; rating.maxPercent)
+                    failures.push(rating.label + ': ' + percent.toFixed(4) + '% (' + snapshot.ratingCounts[i] + '/' + snapshot.total + '); expected ' + rating.minPercent + '-' + rating.maxPercent + '%');
+            }
+            var mean = snapshot.scoreSum / snapshot.total;
+            var bounds = this.config.meanScore;
+            if (bounds.min !== null &amp;amp;&amp;amp; (mean &amp;lt; bounds.min || mean &amp;gt; bounds.max))
+                failures.push('Mean score: ' + mean.toFixed(4) + '; expected ' + bounds.min + '-' + bounds.max);
+            if (failures.length)
+                return { passed: false, message: 'Fail | ' + prefix + '\n' + failures.join('\n') };
+            return { passed: true, message: 'Pass | ' + prefix + ' | ' + percentages.join(' | ') + ' | Mean score: ' + mean.toFixed(2) + (bounds.min === null ? ' (informational)' : '') };
+        } catch (error) {
+            return { passed: false, message: 'Fail | ' + String(error.message || error) };
+        }
+    },
+
+    _validateConfiguration: function() {
+        var config = this.config;
+        if (config.configurationReviewed !== true)
+            throw new Error('Review population, score bands, percentage ranges and minimumRecords; then set configurationReviewed to true.');
+        if (!this._integer(config.minimumRecords) || config.minimumRecords &amp;lt; 1)
+            throw new Error('minimumRecords must be a positive integer.');
+        if (!this._integer(config.scoreMinimum) || !this._integer(config.scoreMaximum) || config.scoreMinimum &amp;lt; 0 || config.scoreMinimum &amp;gt;= config.scoreMaximum)
+            throw new Error('Score domain must have nonnegative integer bounds with minimum &amp;lt; maximum.');
+        if (typeof config.populationLabel !== 'string' || !config.populationLabel.replace(/\s/g, ''))
+            throw new Error('Set a descriptive populationLabel.');
+        if (!/^[a-zA-Z0-9_]+$/.test(config.table)) throw new Error('Invalid table name.');
+        var record = new GlideRecord(config.table);
+        if (!record.isValid()) throw new Error('Table unavailable: ' + config.table);
+        this._validateField(record, config.scoreField);
+        this._validateField(record, config.ratingField);
+        if (config.scoreField === config.ratingField) throw new Error('Score and rating must use different fields.');
+        if (!this._array(config.filters) || !config.filters.length)
+            throw new Error('Define at least one population filter.');
+        for (var i = 0; i &amp;lt; config.filters.length; i++) {
+            var filter = config.filters[i];
+            this._validateField(record, filter.field);
+            // Filtering on these fields could hide exactly the bad data being tested.
+            if (filter.field === config.scoreField || filter.field === config.ratingField)
+                throw new Error('Population filters must not exclude scores or ratings.');
+            if (['=', '!=', 'IN', 'NOT IN', '&amp;gt;', '&amp;gt;=', '&amp;lt;', '&amp;lt;='].indexOf(filter.operator) &amp;lt; 0)
+                throw new Error('Unsupported filter operator: ' + filter.operator);
+            if (filter.value === null || typeof filter.value === 'undefined' ||
+                ['string', 'number', 'boolean'].indexOf(typeof filter.value) &amp;lt; 0 ||
+                (typeof filter.value === 'number' &amp;amp;&amp;amp; !isFinite(filter.value)) ||
+                (typeof filter.value === 'string' &amp;amp;&amp;amp; (!filter.value.replace(/\s/g, '') || /^javascript:/i.test(filter.value))))
+                throw new Error('Use a literal, nonempty filter value for ' + filter.field + '.');
+        }
+        var labels = ['Critical', 'High', 'Medium', 'Low', 'None'];
+        if (!this._array(config.ratings) || config.ratings.length !== 5)
+            throw new Error('Configure all five risk ratings.');
+        var seenValues = {};
+        var sumMin = 0;
+        var sumMax = 0;
+        var orderedBands = [];
+        var unset = [];
+        for (i = 0; i &amp;lt; config.ratings.length; i++) {
+            var rating = config.ratings[i];
+            if (rating.label !== labels[i]) throw new Error('Keep rating labels in Critical, High, Medium, Low, None order.');
+            if (typeof rating.value !== 'string' || !rating.value.replace(/\s/g, '') || seenValues['v:' + rating.value])
+                throw new Error('Rating values must be unique nonempty strings.');
+            seenValues['v:' + rating.value] = true;
+            if (!this._integer(rating.scoreMin) || !this._integer(rating.scoreMax) || rating.scoreMin &amp;gt; rating.scoreMax ||
+                rating.scoreMin &amp;lt; config.scoreMinimum || rating.scoreMax &amp;gt; config.scoreMaximum)
+                throw new Error('Invalid score band: ' + rating.label);
+            orderedBands.push(rating);
+            if (rating.minPercent === null || rating.maxPercent === null) {
+                unset.push(rating.label);
+            } else {
+                this._validateRange(rating.minPercent, rating.maxPercent, 0, 100, rating.label + ' percentages');
+                sumMin += rating.minPercent;
+                sumMax += rating.maxPercent;
+            }
+        }
+        if (unset.length) throw new Error('Set minPercent and maxPercent for: ' + unset.join(', ') + '.');
+        if (sumMin &amp;gt; 100 || sumMax &amp;lt; 100)
+            throw new Error('Percentage ranges cannot sum to 100%: sum(min) must be &amp;lt;= 100 and sum(max) &amp;gt;= 100.');
+        orderedBands.sort(function(a, b) { return a.scoreMin - b.scoreMin; });
+        var nextScore = config.scoreMinimum;
+        for (i = 0; i &amp;lt; orderedBands.length; i++) {
+            if (orderedBands[i].scoreMin !== nextScore) throw new Error('Score bands must cover the score domain without gaps or overlaps.');
+            nextScore = orderedBands[i].scoreMax + 1;
+        }
+        if (nextScore !== config.scoreMaximum + 1) throw new Error('Score bands must cover the entire score domain.');
+        if (!config.meanScore) throw new Error('Configure meanScore or set both bounds to null.');
+        if (config.meanScore.min !== null || config.meanScore.max !== null)
+            this._validateRange(config.meanScore.min, config.meanScore.max, config.scoreMinimum, config.scoreMaximum, 'Mean score');
+    },
+
+    _readSnapshot: function() {
+        var config = this.config;
+        // Authoritative COUNT without a field includes null scores/ratings.
+        var population = this._newAggregate();
+        population.query();
+        var populationCount = population.next() ? this._count(population.getAggregate('COUNT')) : 0;
+        var aggregate = this._newAggregate();
+        // Grouped database aggregation covers the whole population, not a sample.
+        aggregate.groupBy(config.scoreField);
+        aggregate.groupBy(config.ratingField);
+        aggregate.query();
+        var snapshot = { total: 0, invalidScores: 0, invalidRatings: 0, mismatches: 0, scoreSum: 0, ratingCounts: [0, 0, 0, 0, 0] };
+        while (aggregate.next()) {
+            var count = this._count(aggregate.getAggregate('COUNT'));
+            if (count &amp;lt; 1) throw new Error('Empty aggregate group; no health result produced.');
+            var scoreText = this._text(aggregate.getValue(config.scoreField));
+            var ratingText = this._text(aggregate.getValue(config.ratingField));
+            var score = Number(scoreText);
+            var validScore = /^\d+$/.test(scoreText) &amp;amp;&amp;amp; this._integer(score) &amp;amp;&amp;amp; score &amp;gt;= config.scoreMinimum &amp;amp;&amp;amp; score &amp;lt;= config.scoreMaximum;
+            var ratingIndex = -1;
+            for (var i = 0; i &amp;lt; config.ratings.length; i++) {
+                if (config.ratings[i].value === ratingText) { ratingIndex = i; break; }
+            }
+            snapshot.total += count;
+            if (!validScore) snapshot.invalidScores += count;
+            else snapshot.scoreSum += score * count;
+            if (ratingIndex &amp;lt; 0) snapshot.invalidRatings += count;
+            else snapshot.ratingCounts[ratingIndex] += count;
+            if (validScore &amp;amp;&amp;amp; ratingIndex &amp;gt;= 0) {
+                var rating = config.ratings[ratingIndex];
+                if (score &amp;lt; rating.scoreMin || score &amp;gt; rating.scoreMax) snapshot.mismatches += count;
+            }
+        }
+        if (snapshot.total !== populationCount)
+            throw new Error('Population changed or grouped results are incomplete; total: ' + populationCount + ', grouped: ' + snapshot.total + '. Retry after imports and recalculation finish.');
+        return snapshot;
+    },
+
+    _newAggregate: function() {
+        var aggregate = new GlideAggregate(this.config.table);
+        for (var i = 0; i &amp;lt; this.config.filters.length; i++) {
+            var filter = this.config.filters[i];
+            aggregate.addQuery(filter.field, filter.operator, filter.value);
+        }
+        aggregate.addAggregate('COUNT');
+        return aggregate;
+    },
+    _count: function(value) {
+        var text = String(value);
+        if (!/^\d+$/.test(text) || !this._integer(Number(text))) throw new Error('Invalid aggregate count; no health result produced.');
+        return Number(text);
+    },
+
+    _validateField: function(record, field) {
+        if (typeof field !== 'string' || !/^[a-zA-Z0-9_]+$/.test(field) || !record.isValidField(field))
+            throw new Error('Invalid or unavailable direct field: ' + field);
+    },
+    _validateRange: function(min, max, lower, upper, name) {
+        if (typeof min !== 'number' || typeof max !== 'number' || !isFinite(min) || !isFinite(max) || min &amp;lt; lower || max &amp;gt; upper || min &amp;gt; max)
+            throw new Error(name + ' requires numeric min/max within ' + lower + '-' + upper + ', with min &amp;lt;= max.');
+    },
+    _integer: function(value) { return typeof value === 'number' &amp;amp;&amp;amp; isFinite(value) &amp;amp;&amp;amp; Math.floor(value) === value; },
+    _array: function(value) { return Object.prototype.toString.call(value) === '[object Array]'; },
+    _text: function(value) { return value === null || typeof value === 'undefined' ? '' : String(value).replace(/^\s+|\s+$/g, ''); },
+    type: 'VRRiskDataHealth'
+};
+&lt;/script&gt;&lt;/sys_script_include&gt;&lt;/record_update&gt;</payload>
+    <remote_update_set>f55f6ed39e36f6d00e28d889028b242a</remote_update_set>
+    <replace_on_upgrade>false</replace_on_upgrade>
+    <target_name>VRRiskDataHealth</target_name>
+    <type>Script Include</type>
+    <update_domain>global</update_domain>
+    <sys_created_by>repository</sys_created_by>
+    <sys_updated_by>repository</sys_updated_by>
+    <sys_created_on>2026-09-25 00:00:00</sys_created_on>
+    <sys_updated_on>2026-09-25 00:00:00</sys_updated_on>
+    <sys_mod_count>0</sys_mod_count>
+  </sys_update_xml>
+  <sys_update_xml action="INSERT_OR_UPDATE">
+    <sys_id>3d8f7c6b04805a8e78a7c0ef605ee40d</sys_id>
+    <action>INSERT_OR_UPDATE</action>
+    <application>global</application>
+    <category>customer</category>
+    <name>sys_atf_test_6087537b23a008b8c0827d786c598e48</name>
+    <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_atf_test"&gt;&lt;sys_atf_test action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;6087537b23a008b8c0827d786c598e48&lt;/sys_id&gt;&lt;sys_class_name&gt;sys_atf_test&lt;/sys_class_name&gt;&lt;sys_name&gt;VR - Risk score and rating health&lt;/sys_name&gt;&lt;sys_update_name&gt;sys_atf_test_6087537b23a008b8c0827d786c598e48&lt;/sys_update_name&gt;&lt;sys_customer_update&gt;true&lt;/sys_customer_update&gt;&lt;sys_replace_on_upgrade&gt;false&lt;/sys_replace_on_upgrade&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_created_by&gt;repository&lt;/sys_created_by&gt;&lt;sys_updated_by&gt;repository&lt;/sys_updated_by&gt;&lt;sys_created_on&gt;2026-09-25 00:00:00&lt;/sys_created_on&gt;&lt;sys_updated_on&gt;2026-09-25 00:00:00&lt;/sys_updated_on&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;name&gt;VR - Risk score and rating health&lt;/name&gt;&lt;active&gt;true&lt;/active&gt;&lt;description&gt;Read-only health checks for existing VIT risk scores and ratings. Configure VRRiskDataHealth before running after imports and recalculation finish. Add this test to your existing suite.&lt;/description&gt;&lt;enable_parameterized_testing&gt;false&lt;/enable_parameterized_testing&gt;&lt;fail_on_server_error&gt;true&lt;/fail_on_server_error&gt;&lt;/sys_atf_test&gt;&lt;/record_update&gt;</payload>
+    <remote_update_set>f55f6ed39e36f6d00e28d889028b242a</remote_update_set>
+    <replace_on_upgrade>false</replace_on_upgrade>
+    <target_name>VR - Risk score and rating health</target_name>
+    <type>Test</type>
+    <update_domain>global</update_domain>
+    <sys_created_by>repository</sys_created_by>
+    <sys_updated_by>repository</sys_updated_by>
+    <sys_created_on>2026-09-25 00:00:00</sys_created_on>
+    <sys_updated_on>2026-09-25 00:00:00</sys_updated_on>
+    <sys_mod_count>0</sys_mod_count>
+  </sys_update_xml>
+  <sys_update_xml action="INSERT_OR_UPDATE">
+    <sys_id>3a0a48ff8533a98c88443f7130f001e3</sys_id>
+    <action>INSERT_OR_UPDATE</action>
+    <application>global</application>
+    <category>customer</category>
+    <name>sys_atf_step_07e816fa7c4dd0dd3aff57d9ec808ac2</name>
+    <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_atf_step"&gt;&lt;sys_atf_step action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;07e816fa7c4dd0dd3aff57d9ec808ac2&lt;/sys_id&gt;&lt;sys_class_name&gt;sys_atf_step&lt;/sys_class_name&gt;&lt;sys_name&gt;Configuration and fields&lt;/sys_name&gt;&lt;sys_update_name&gt;sys_atf_step_07e816fa7c4dd0dd3aff57d9ec808ac2&lt;/sys_update_name&gt;&lt;sys_customer_update&gt;true&lt;/sys_customer_update&gt;&lt;sys_replace_on_upgrade&gt;false&lt;/sys_replace_on_upgrade&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_created_by&gt;repository&lt;/sys_created_by&gt;&lt;sys_updated_by&gt;repository&lt;/sys_updated_by&gt;&lt;sys_created_on&gt;2026-09-25 00:00:00&lt;/sys_created_on&gt;&lt;sys_updated_on&gt;2026-09-25 00:00:00&lt;/sys_updated_on&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;active&gt;true&lt;/active&gt;&lt;description&gt;Configuration and fields&lt;/description&gt;&lt;display_name&gt;Run Server Side Script&lt;/display_name&gt;&lt;notes&gt;Configuration and fields - uses the shared VRRiskDataHealth configuration.&lt;/notes&gt;&lt;order&gt;1&lt;/order&gt;&lt;step_config&gt;41de4a935332120028bc29cac2dc349a&lt;/step_config&gt;&lt;test&gt;6087537b23a008b8c0827d786c598e48&lt;/test&gt;&lt;/sys_atf_step&gt;&lt;sys_variable_value action="delete_multiple" query="document_key=07e816fa7c4dd0dd3aff57d9ec808ac2" /&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;c31ea237ee8f6b364c78ec3feba614bd&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;07e816fa7c4dd0dd3aff57d9ec808ac2&lt;/document_key&gt;&lt;variable&gt;42f2564b73031300440211d8faf6a777&lt;/variable&gt;&lt;value&gt;3.1&lt;/value&gt;&lt;order&gt;100&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;ceb92846f34974c13819d4c045110f40&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;07e816fa7c4dd0dd3aff57d9ec808ac2&lt;/document_key&gt;&lt;variable&gt;989d9e235324220002c6435723dc3484&lt;/variable&gt;&lt;value&gt;// ATF step 1: validate configuration and required fields.
+(function(outputs, steps, stepResult, assertEqual) {
+    var result = new VRRiskDataHealth().run('configuration');
+    stepResult.setOutputMessage(result.message);
+    assertEqual({ name: 'VR risk health configuration', shouldbe: true, value: result.passed });
+    return result.passed;
+})(outputs, steps, stepResult, assertEqual);
+&lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
+    <remote_update_set>f55f6ed39e36f6d00e28d889028b242a</remote_update_set>
+    <replace_on_upgrade>false</replace_on_upgrade>
+    <target_name>Configuration and fields</target_name>
+    <type>Test Step</type>
+    <update_domain>global</update_domain>
+    <sys_created_by>repository</sys_created_by>
+    <sys_updated_by>repository</sys_updated_by>
+    <sys_created_on>2026-09-25 00:00:00</sys_created_on>
+    <sys_updated_on>2026-09-25 00:00:00</sys_updated_on>
+    <sys_mod_count>0</sys_mod_count>
+  </sys_update_xml>
+  <sys_update_xml action="INSERT_OR_UPDATE">
+    <sys_id>b9d223504c74ea7cff283a2d0f9de619</sys_id>
+    <action>INSERT_OR_UPDATE</action>
+    <application>global</application>
+    <category>customer</category>
+    <name>sys_atf_step_e75b2d968d5670b768f95e27d360d4f0</name>
+    <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_atf_step"&gt;&lt;sys_atf_step action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;e75b2d968d5670b768f95e27d360d4f0&lt;/sys_id&gt;&lt;sys_class_name&gt;sys_atf_step&lt;/sys_class_name&gt;&lt;sys_name&gt;Population size&lt;/sys_name&gt;&lt;sys_update_name&gt;sys_atf_step_e75b2d968d5670b768f95e27d360d4f0&lt;/sys_update_name&gt;&lt;sys_customer_update&gt;true&lt;/sys_customer_update&gt;&lt;sys_replace_on_upgrade&gt;false&lt;/sys_replace_on_upgrade&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_created_by&gt;repository&lt;/sys_created_by&gt;&lt;sys_updated_by&gt;repository&lt;/sys_updated_by&gt;&lt;sys_created_on&gt;2026-09-25 00:00:00&lt;/sys_created_on&gt;&lt;sys_updated_on&gt;2026-09-25 00:00:00&lt;/sys_updated_on&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;active&gt;true&lt;/active&gt;&lt;description&gt;Population size&lt;/description&gt;&lt;display_name&gt;Run Server Side Script&lt;/display_name&gt;&lt;notes&gt;Population size - uses the shared VRRiskDataHealth configuration.&lt;/notes&gt;&lt;order&gt;2&lt;/order&gt;&lt;step_config&gt;41de4a935332120028bc29cac2dc349a&lt;/step_config&gt;&lt;test&gt;6087537b23a008b8c0827d786c598e48&lt;/test&gt;&lt;/sys_atf_step&gt;&lt;sys_variable_value action="delete_multiple" query="document_key=e75b2d968d5670b768f95e27d360d4f0" /&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;3f788567da64f40adbd6b9181322c009&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;e75b2d968d5670b768f95e27d360d4f0&lt;/document_key&gt;&lt;variable&gt;42f2564b73031300440211d8faf6a777&lt;/variable&gt;&lt;value&gt;3.1&lt;/value&gt;&lt;order&gt;100&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;33270159d33e0c38c55f70128b4f9092&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;e75b2d968d5670b768f95e27d360d4f0&lt;/document_key&gt;&lt;variable&gt;989d9e235324220002c6435723dc3484&lt;/variable&gt;&lt;value&gt;// ATF step 2: ensure the filtered VIT population is large enough.
+(function(outputs, steps, stepResult, assertEqual) {
+    var result = new VRRiskDataHealth().run('population');
+    stepResult.setOutputMessage(result.message);
+    assertEqual({ name: 'VR risk health population', shouldbe: true, value: result.passed });
+    return result.passed;
+})(outputs, steps, stepResult, assertEqual);
+&lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
+    <remote_update_set>f55f6ed39e36f6d00e28d889028b242a</remote_update_set>
+    <replace_on_upgrade>false</replace_on_upgrade>
+    <target_name>Population size</target_name>
+    <type>Test Step</type>
+    <update_domain>global</update_domain>
+    <sys_created_by>repository</sys_created_by>
+    <sys_updated_by>repository</sys_updated_by>
+    <sys_created_on>2026-09-25 00:00:00</sys_created_on>
+    <sys_updated_on>2026-09-25 00:00:00</sys_updated_on>
+    <sys_mod_count>0</sys_mod_count>
+  </sys_update_xml>
+  <sys_update_xml action="INSERT_OR_UPDATE">
+    <sys_id>f0c22eb79466fd3a2b5a6e8658e22c43</sys_id>
+    <action>INSERT_OR_UPDATE</action>
+    <application>global</application>
+    <category>customer</category>
+    <name>sys_atf_step_381fbeac3ae718c1722662b4eb75a475</name>
+    <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_atf_step"&gt;&lt;sys_atf_step action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;381fbeac3ae718c1722662b4eb75a475&lt;/sys_id&gt;&lt;sys_class_name&gt;sys_atf_step&lt;/sys_class_name&gt;&lt;sys_name&gt;Score and rating values&lt;/sys_name&gt;&lt;sys_update_name&gt;sys_atf_step_381fbeac3ae718c1722662b4eb75a475&lt;/sys_update_name&gt;&lt;sys_customer_update&gt;true&lt;/sys_customer_update&gt;&lt;sys_replace_on_upgrade&gt;false&lt;/sys_replace_on_upgrade&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_created_by&gt;repository&lt;/sys_created_by&gt;&lt;sys_updated_by&gt;repository&lt;/sys_updated_by&gt;&lt;sys_created_on&gt;2026-09-25 00:00:00&lt;/sys_created_on&gt;&lt;sys_updated_on&gt;2026-09-25 00:00:00&lt;/sys_updated_on&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;active&gt;true&lt;/active&gt;&lt;description&gt;Score and rating values&lt;/description&gt;&lt;display_name&gt;Run Server Side Script&lt;/display_name&gt;&lt;notes&gt;Score and rating values - uses the shared VRRiskDataHealth configuration.&lt;/notes&gt;&lt;order&gt;3&lt;/order&gt;&lt;step_config&gt;41de4a935332120028bc29cac2dc349a&lt;/step_config&gt;&lt;test&gt;6087537b23a008b8c0827d786c598e48&lt;/test&gt;&lt;/sys_atf_step&gt;&lt;sys_variable_value action="delete_multiple" query="document_key=381fbeac3ae718c1722662b4eb75a475" /&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;aa67a6a5b312cf9d3242aaba6b434c9f&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;381fbeac3ae718c1722662b4eb75a475&lt;/document_key&gt;&lt;variable&gt;42f2564b73031300440211d8faf6a777&lt;/variable&gt;&lt;value&gt;3.1&lt;/value&gt;&lt;order&gt;100&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;c6164a858817a60cbc93df42138ee1e5&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;381fbeac3ae718c1722662b4eb75a475&lt;/document_key&gt;&lt;variable&gt;989d9e235324220002c6435723dc3484&lt;/variable&gt;&lt;value&gt;// ATF step 3: reject missing, noninteger/out-of-range scores and unknown ratings.
+(function(outputs, steps, stepResult, assertEqual) {
+    var result = new VRRiskDataHealth().run('values');
+    stepResult.setOutputMessage(result.message);
+    assertEqual({ name: 'VR risk health valid scores and ratings', shouldbe: true, value: result.passed });
+    return result.passed;
+})(outputs, steps, stepResult, assertEqual);
+&lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
+    <remote_update_set>f55f6ed39e36f6d00e28d889028b242a</remote_update_set>
+    <replace_on_upgrade>false</replace_on_upgrade>
+    <target_name>Score and rating values</target_name>
+    <type>Test Step</type>
+    <update_domain>global</update_domain>
+    <sys_created_by>repository</sys_created_by>
+    <sys_updated_by>repository</sys_updated_by>
+    <sys_created_on>2026-09-25 00:00:00</sys_created_on>
+    <sys_updated_on>2026-09-25 00:00:00</sys_updated_on>
+    <sys_mod_count>0</sys_mod_count>
+  </sys_update_xml>
+  <sys_update_xml action="INSERT_OR_UPDATE">
+    <sys_id>0175e4c34e8a0bc1692237bafca7082e</sys_id>
+    <action>INSERT_OR_UPDATE</action>
+    <application>global</application>
+    <category>customer</category>
+    <name>sys_atf_step_24f256845b06ee7f210c215d65adb6cb</name>
+    <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_atf_step"&gt;&lt;sys_atf_step action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;24f256845b06ee7f210c215d65adb6cb&lt;/sys_id&gt;&lt;sys_class_name&gt;sys_atf_step&lt;/sys_class_name&gt;&lt;sys_name&gt;Score/rating consistency&lt;/sys_name&gt;&lt;sys_update_name&gt;sys_atf_step_24f256845b06ee7f210c215d65adb6cb&lt;/sys_update_name&gt;&lt;sys_customer_update&gt;true&lt;/sys_customer_update&gt;&lt;sys_replace_on_upgrade&gt;false&lt;/sys_replace_on_upgrade&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_created_by&gt;repository&lt;/sys_created_by&gt;&lt;sys_updated_by&gt;repository&lt;/sys_updated_by&gt;&lt;sys_created_on&gt;2026-09-25 00:00:00&lt;/sys_created_on&gt;&lt;sys_updated_on&gt;2026-09-25 00:00:00&lt;/sys_updated_on&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;active&gt;true&lt;/active&gt;&lt;description&gt;Score/rating consistency&lt;/description&gt;&lt;display_name&gt;Run Server Side Script&lt;/display_name&gt;&lt;notes&gt;Score/rating consistency - uses the shared VRRiskDataHealth configuration.&lt;/notes&gt;&lt;order&gt;4&lt;/order&gt;&lt;step_config&gt;41de4a935332120028bc29cac2dc349a&lt;/step_config&gt;&lt;test&gt;6087537b23a008b8c0827d786c598e48&lt;/test&gt;&lt;/sys_atf_step&gt;&lt;sys_variable_value action="delete_multiple" query="document_key=24f256845b06ee7f210c215d65adb6cb" /&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;b941659663a8482be1182f33d4cad7e2&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;24f256845b06ee7f210c215d65adb6cb&lt;/document_key&gt;&lt;variable&gt;42f2564b73031300440211d8faf6a777&lt;/variable&gt;&lt;value&gt;3.1&lt;/value&gt;&lt;order&gt;100&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;a060085d8229433be74de81543d1850c&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;24f256845b06ee7f210c215d65adb6cb&lt;/document_key&gt;&lt;variable&gt;989d9e235324220002c6435723dc3484&lt;/variable&gt;&lt;value&gt;// ATF step 4: verify every valid score maps to its configured risk rating.
+(function(outputs, steps, stepResult, assertEqual) {
+    var result = new VRRiskDataHealth().run('consistency');
+    stepResult.setOutputMessage(result.message);
+    assertEqual({ name: 'VR risk health score/rating consistency', shouldbe: true, value: result.passed });
+    return result.passed;
+})(outputs, steps, stepResult, assertEqual);
+&lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
+    <remote_update_set>f55f6ed39e36f6d00e28d889028b242a</remote_update_set>
+    <replace_on_upgrade>false</replace_on_upgrade>
+    <target_name>Score/rating consistency</target_name>
+    <type>Test Step</type>
+    <update_domain>global</update_domain>
+    <sys_created_by>repository</sys_created_by>
+    <sys_updated_by>repository</sys_updated_by>
+    <sys_created_on>2026-09-25 00:00:00</sys_created_on>
+    <sys_updated_on>2026-09-25 00:00:00</sys_updated_on>
+    <sys_mod_count>0</sys_mod_count>
+  </sys_update_xml>
+  <sys_update_xml action="INSERT_OR_UPDATE">
+    <sys_id>5488c7ec4083d7d9b1c4a299f84c3d13</sys_id>
+    <action>INSERT_OR_UPDATE</action>
+    <application>global</application>
+    <category>customer</category>
+    <name>sys_atf_step_359e2ed002f74a23f26571015357fe9b</name>
+    <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_atf_step"&gt;&lt;sys_atf_step action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;359e2ed002f74a23f26571015357fe9b&lt;/sys_id&gt;&lt;sys_class_name&gt;sys_atf_step&lt;/sys_class_name&gt;&lt;sys_name&gt;Rating distribution&lt;/sys_name&gt;&lt;sys_update_name&gt;sys_atf_step_359e2ed002f74a23f26571015357fe9b&lt;/sys_update_name&gt;&lt;sys_customer_update&gt;true&lt;/sys_customer_update&gt;&lt;sys_replace_on_upgrade&gt;false&lt;/sys_replace_on_upgrade&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_created_by&gt;repository&lt;/sys_created_by&gt;&lt;sys_updated_by&gt;repository&lt;/sys_updated_by&gt;&lt;sys_created_on&gt;2026-09-25 00:00:00&lt;/sys_created_on&gt;&lt;sys_updated_on&gt;2026-09-25 00:00:00&lt;/sys_updated_on&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;active&gt;true&lt;/active&gt;&lt;description&gt;Rating distribution&lt;/description&gt;&lt;display_name&gt;Run Server Side Script&lt;/display_name&gt;&lt;notes&gt;Rating distribution - uses the shared VRRiskDataHealth configuration.&lt;/notes&gt;&lt;order&gt;5&lt;/order&gt;&lt;step_config&gt;41de4a935332120028bc29cac2dc349a&lt;/step_config&gt;&lt;test&gt;6087537b23a008b8c0827d786c598e48&lt;/test&gt;&lt;/sys_atf_step&gt;&lt;sys_variable_value action="delete_multiple" query="document_key=359e2ed002f74a23f26571015357fe9b" /&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;1710044153c0c40015d3affd71379c10&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;359e2ed002f74a23f26571015357fe9b&lt;/document_key&gt;&lt;variable&gt;42f2564b73031300440211d8faf6a777&lt;/variable&gt;&lt;value&gt;3.1&lt;/value&gt;&lt;order&gt;100&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;sys_variable_value action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;42cbc69a0154a869d4552b702dafff53&lt;/sys_id&gt;&lt;document&gt;sys_atf_step&lt;/document&gt;&lt;document_key&gt;359e2ed002f74a23f26571015357fe9b&lt;/document_key&gt;&lt;variable&gt;989d9e235324220002c6435723dc3484&lt;/variable&gt;&lt;value&gt;// ATF step 5: check all five percentage ranges and optional mean-score bounds.
+(function(outputs, steps, stepResult, assertEqual) {
+    var result = new VRRiskDataHealth().run('distribution');
+    stepResult.setOutputMessage(result.message);
+    assertEqual({ name: 'VR risk health rating distribution', shouldbe: true, value: result.passed });
+    return result.passed;
+})(outputs, steps, stepResult, assertEqual);
+&lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
+    <remote_update_set>f55f6ed39e36f6d00e28d889028b242a</remote_update_set>
+    <replace_on_upgrade>false</replace_on_upgrade>
+    <target_name>Rating distribution</target_name>
+    <type>Test Step</type>
+    <update_domain>global</update_domain>
+    <sys_created_by>repository</sys_created_by>
+    <sys_updated_by>repository</sys_updated_by>
+    <sys_created_on>2026-09-25 00:00:00</sys_created_on>
+    <sys_updated_on>2026-09-25 00:00:00</sys_updated_on>
+    <sys_mod_count>0</sys_mod_count>
+  </sys_update_xml>
+</unload>
