@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ATF = ROOT / "Scripts" / "ATF"
 OUTPUT = ATF / "VR_Risk_Data_Health_ATF.update-set.xml"
 NAME = "VR - Risk score and rating health"
-STAMP = "2026-09-25 00:00:00"
+STAMP = "2026-09-25 19:02:37"
+PACKAGE_REVISION = "v2"  # New envelope IDs; test/helper/step IDs stay stable.
 STEP_CONFIG = "41de4a935332120028bc29cac2dc349a"
 JASMINE_INPUT = "42f2564b73031300440211d8faf6a777"
 SCRIPT_INPUT = "989d9e235324220002c6435723dc3484"
@@ -68,16 +69,16 @@ def payload(table, identity, name, values):
 
 def build():
     root = ET.Element("unload", {"unload_date": STAMP})
-    remote_id = guid("remote-update-set")
+    remote_id = guid(PACKAGE_REVISION + "/remote-update-set")
     remote = ET.SubElement(root, "sys_remote_update_set", {"action": "INSERT_OR_UPDATE"})
     for key, value in {
         "sys_id": remote_id,
-        "name": NAME,
+        "name": NAME + " - " + PACKAGE_REVISION,
         "description": "One Global ATF test, five Run Server Side Script steps and VRRiskDataHealth. Configure percentage ranges before running; add to an existing suite. Reads VIT data only.",
         "application": "global",
         "application_name": "Global",
         "application_scope": "global",
-        "remote_sys_id": guid("source-update-set"),
+        "remote_sys_id": guid(PACKAGE_REVISION + "/source-update-set"),
         "state": "loaded",
         "sys_created_by": "repository",
         "sys_updated_by": "repository",
@@ -90,7 +91,7 @@ def build():
     def customer_update(table, identity, display, type_name, contents):
         update = ET.SubElement(root, "sys_update_xml", {"action": "INSERT_OR_UPDATE"})
         for key, value in {
-            "sys_id": guid("update/" + identity),
+            "sys_id": guid(PACKAGE_REVISION + "/update/" + identity),
             "action": "INSERT_OR_UPDATE",
             "application": "global",
             "category": "customer",

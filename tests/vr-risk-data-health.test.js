@@ -145,6 +145,16 @@ test('invalid configuration and schema fail before database queries', () => {
         config => { config.filters[0].value = Infinity; },
         config => { config.minimumRecords = 0; },
         config => { config.minimumRecords = 1.5; },
+        config => { delete config.populationCountTolerance; },
+        config => { config.populationCountTolerance.maxDifferenceRecords = -1; },
+        config => { config.populationCountTolerance.maxDifferenceRecords = 1.5; },
+        config => { config.populationCountTolerance.maxDifferenceRecords = '1'; },
+        config => { config.populationCountTolerance.maxDifferenceRecords = Infinity; },
+        config => { config.populationCountTolerance.maxDifferencePercent = null; },
+        config => { config.populationCountTolerance.maxDifferencePercent = '1'; },
+        config => { config.populationCountTolerance.maxDifferencePercent = NaN; },
+        config => { config.populationCountTolerance.maxDifferencePercent = -1; },
+        config => { config.populationCountTolerance.maxDifferencePercent = 101; },
         config => { config.populationLabel = ' '; },
         config => { config.ratings.pop(); },
         config => { config.ratings[0].value = config.ratings[1].value; },
@@ -272,6 +282,75 @@ test('ungrouped count detects omitted null groups and population changes', () =>
         assert.ok(environment.queries.some(query => query.groups.length === 0), 'An independent total is required');
         assert.ok(environment.queries.some(query => query.groups.length === 2), 'Scores and ratings must both be grouped');
     }
+});
+
+test('default 1% count tolerance accepts inclusive differences in both directions', () => {
+    for (const length of [99, 100, 101]) {
+        const environment = setup(Array.from({ length }, () => vit('50', '3')), { populationCount: '100' });
+        for (const check of checks.slice(1)) {
+            const result = environment.run(check);
+            pass(result);
+            if (length !== 100) assert.match(result.message, /Count variance: 1 \(population: 100; allowed: 1\)/);
+            else assert.doesNotMatch(result.message, /Count variance/);
+        }
+    }
+    for (const length of [98, 102]) {
+        fail(setup(Array.from({ length }, () => vit('50', '3')), { populationCount: '100' }).run('population'), /difference: 2, allowed: 1/);
+    }
+});
+
+test('absolute count allowance, strict mode and larger-of semantics are configurable', () => {
+    const environment = setup(healthy, { populationCount: '8' });
+    environment.helper.config.populationCountTolerance = { maxDifferenceRecords: 3, maxDifferencePercent: 0 };
+    pass(environment.run('population'));
+    environment.helper.config.populationCountTolerance.maxDifferenceRecords = 2;
+    fail(environment.run('population'), /difference: 3, allowed: 2/);
+    environment.helper.config.populationCountTolerance = { maxDifferenceRecords: 0, maxDifferencePercent: 0 };
+    fail(environment.run('population'), /difference: 3, allowed: 0/);
+    pass(setup(healthy).run('population'));
+
+    const percent = setup(Array.from({ length: 95 }, () => vit('50', '3')), { populationCount: '100' });
+    percent.helper.config.populationCountTolerance = { maxDifferenceRecords: 2, maxDifferencePercent: 5 };
+    pass(percent.run('population'));
+    // The limits are not added: 2 records + 3% must not allow a difference of 5.
+    percent.helper.config.populationCountTolerance.maxDifferencePercent = 3;
+    fail(percent.run('population'), /difference: 5, allowed: 3/);
+    percent.helper.config.populationCountTolerance = { maxDifferenceRecords: 5, maxDifferencePercent: 1 };
+    pass(percent.run('population'));
+});
+
+test('fractional percentage tolerances use the baseline count and round down', () => {
+    const environment = setup(Array.from({ length: 99 }, () => vit('50', '3')), { populationCount: '100' });
+    environment.helper.config.populationCountTolerance.maxDifferencePercent = 0.99;
+    fail(environment.run('population'), /difference: 1, allowed: 0/);
+    environment.helper.config.populationCountTolerance.maxDifferencePercent = 1.01;
+    pass(environment.run('population'));
+});
+
+test('tolerated differences never bypass minimum size, empty data or invalid values', () => {
+    for (const [rows, populationCount] of [[[], '5'], [healthy, '0'], [healthy, '4'], [healthy.slice(0, 4), '5']]) {
+        const environment = setup(rows, { populationCount });
+        environment.helper.config.populationCountTolerance.maxDifferenceRecords = 100;
+        environment.helper.config.minimumRecords = 5;
+        for (const check of checks.slice(1)) fail(environment.run(check), /Insufficient data/);
+    }
+    for (const bad of [vit(null, '5'), vit('0', null), vit('89', '1')]) {
+        const environment = setup([...healthy, bad], { populationCount: '5' });
+        environment.helper.config.populationCountTolerance.maxDifferenceRecords = 1;
+        pass(environment.run('population'));
+        fail(environment.run('distribution'), /Missing\/invalid|mismatches/);
+    }
+});
+
+test('distribution and mean use the grouped denominator after accepting count variance', () => {
+    const environment = setup([vit('100', '1'), ...Array.from({ length: 98 }, () => vit('0', '5'))], { populationCount: '100' });
+    environment.helper.config.ratings[0].maxPercent = 1.005;
+    fail(environment.run('distribution'), /Critical: 1\.0101% \(1\/99\)/);
+    environment.helper.config.ratings[0].maxPercent = 100;
+    environment.helper.config.meanScore = { min: 100 / 99, max: 100 / 99 };
+    const result = environment.run('distribution');
+    pass(result);
+    assert.match(result.message, /VITs: 99.*Count variance: 1/);
 });
 
 test('all aggregate queries use the same validated AND population filters', () => {

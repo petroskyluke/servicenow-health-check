@@ -8,12 +8,16 @@ var VRRiskDataHealth = Class.create();
 VRRiskDataHealth.prototype = {
     initialize: function() {
         /**************************************************************
-         * EDIT THESE SETTINGS BEFORE RUNNING THE ATF TEST.
+         * ALL TEST SETTINGS - EDIT ONLY THIS CONFIGURATION BLOCK.
+         * Shared by all five steps; no settings need editing in the steps.
          * Percentage ranges are deliberately unset, not recommendations.
          * Use a verified healthy population to decide acceptable ranges.
          **************************************************************/
         this.config = {
+            // 1. CONFIGURATION REVIEW
             configurationReviewed: false, // Set true after reviewing ALL settings.
+
+            // 2. TABLE, FIELDS AND POPULATION
             table: 'sn_vul_vulnerable_item',
             scoreField: 'risk_score',
             ratingField: 'risk_rating',
@@ -24,6 +28,16 @@ VRRiskDataHealth.prototype = {
                 // Example: { field: 'source', operator: '=', value: 'YOUR_SOURCE' }
             ],
             minimumRecords: 100, // Choose a meaningful minimum for this population.
+
+            // 3. COUNT VARIANCE BETWEEN THE TWO QUERIES
+            // Allow the LARGER of this record allowance or this % of populationCount.
+            // 1 means 1%; fractional allowed counts round DOWN. Both 0 = exact match.
+            populationCountTolerance: {
+                maxDifferenceRecords: 0,
+                maxDifferencePercent: 1
+            },
+
+            // 4. SCORE DOMAIN, RATING MAPPING AND ACCEPTED PERCENTAGES
             // Integer score domain and rating bands must match YOUR instance.
             scoreMinimum: 0,
             scoreMaximum: 100,
@@ -34,10 +48,12 @@ VRRiskDataHealth.prototype = {
                 { value: '4', label: 'Low',      scoreMin: 1,  scoreMax: 39,  minPercent: null, maxPercent: null },
                 { value: '5', label: 'None',     scoreMin: 0,  scoreMax: 0,   minPercent: null, maxPercent: null }
             ],
-            // Optional: helps catch lower scores even within the same rating.
+            // 5. OPTIONAL MEAN-SCORE BOUNDS
+            // Helps catch lower scores even within the same rating.
             // Both null disables this extra check; otherwise set BOTH bounds.
             meanScore: { min: null, max: null }
         };
+        /**************** END OF ALL EDITABLE TEST SETTINGS ****************/
     },
 
     run: function(check) {
@@ -50,7 +66,10 @@ VRRiskDataHealth.prototype = {
 
             var snapshot = this._readSnapshot();
             var prefix = this.config.populationLabel + ' | VITs: ' + snapshot.total;
-            if (snapshot.total < this.config.minimumRecords)
+            if (snapshot.countDifference)
+                prefix += ' | Count variance: ' + snapshot.countDifference + ' (population: ' + snapshot.populationCount + '; allowed: ' + snapshot.allowedCountDifference + ')';
+            // A tolerance must not turn an empty or undersized query into a pass.
+            if (Math.min(snapshot.total, snapshot.populationCount) < this.config.minimumRecords)
                 return { passed: false, message: 'Fail | ' + prefix + ' | Insufficient data; minimum: ' + this.config.minimumRecords };
             if (check === 'population')
                 return { passed: true, message: 'Pass | ' + prefix };
@@ -94,9 +113,15 @@ VRRiskDataHealth.prototype = {
     _validateConfiguration: function() {
         var config = this.config;
         if (config.configurationReviewed !== true)
-            throw new Error('Review population, score bands, percentage ranges and minimumRecords; then set configurationReviewed to true.');
+            throw new Error('Review ALL TEST SETTINGS in initialize, including count tolerance; then set configurationReviewed to true.');
         if (!this._integer(config.minimumRecords) || config.minimumRecords < 1)
             throw new Error('minimumRecords must be a positive integer.');
+        var tolerance = config.populationCountTolerance;
+        if (!tolerance || !this._integer(tolerance.maxDifferenceRecords) || tolerance.maxDifferenceRecords < 0)
+            throw new Error('populationCountTolerance.maxDifferenceRecords must be a nonnegative integer.');
+        if (typeof tolerance.maxDifferencePercent !== 'number' || !isFinite(tolerance.maxDifferencePercent) ||
+            tolerance.maxDifferencePercent < 0 || tolerance.maxDifferencePercent > 100)
+            throw new Error('populationCountTolerance.maxDifferencePercent must be a number from 0 through 100.');
         if (!this._integer(config.scoreMinimum) || !this._integer(config.scoreMaximum) || config.scoreMinimum < 0 || config.scoreMinimum >= config.scoreMaximum)
             throw new Error('Score domain must have nonnegative integer bounds with minimum < maximum.');
         if (typeof config.populationLabel !== 'string' || !config.populationLabel.replace(/\s/g, ''))
@@ -166,7 +191,7 @@ VRRiskDataHealth.prototype = {
 
     _readSnapshot: function() {
         var config = this.config;
-        // Authoritative COUNT without a field includes null scores/ratings.
+        // Baseline COUNT without a field includes null scores/ratings.
         var population = this._newAggregate();
         population.query();
         var populationCount = population.next() ? this._count(population.getAggregate('COUNT')) : 0;
@@ -197,8 +222,16 @@ VRRiskDataHealth.prototype = {
                 if (score < rating.scoreMin || score > rating.scoreMax) snapshot.mismatches += count;
             }
         }
-        if (snapshot.total !== populationCount)
-            throw new Error('Population changed or grouped results are incomplete; total: ' + populationCount + ', grouped: ' + snapshot.total + '. Retry after imports and recalculation finish.');
+        var tolerance = config.populationCountTolerance;
+        snapshot.populationCount = populationCount;
+        snapshot.countDifference = Math.abs(snapshot.total - populationCount);
+        snapshot.allowedCountDifference = Math.max(tolerance.maxDifferenceRecords,
+            Math.floor(populationCount * tolerance.maxDifferencePercent / 100));
+        if (snapshot.countDifference > snapshot.allowedCountDifference)
+            throw new Error('Population count variance exceeds tolerance; population: ' + populationCount + ', grouped: ' + snapshot.total +
+                ', difference: ' + snapshot.countDifference + ', allowed: ' + snapshot.allowedCountDifference +
+                '. Configure populationCountTolerance in ALL TEST SETTINGS or retry after imports and recalculation finish.');
+        // All rating percentages and the mean use this SAME grouped snapshot total.
         return snapshot;
     },
 
