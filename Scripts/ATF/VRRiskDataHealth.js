@@ -1,5 +1,5 @@
 /*
- * Global, server-only Script Include: VRRiskDataHealth
+ * Vulnerability Response (sn_vul), server-only Script Include: VRRiskDataHealth
  * One ATF test uses this helper from the five scripts in steps/.
  * Reads existing VITs only; never updates records or recalculates risk.
  * Setup and sources: README.md in this directory.
@@ -10,7 +10,7 @@ VRRiskDataHealth.prototype = {
         /**************************************************************
          * ALL TEST SETTINGS - EDIT ONLY THIS CONFIGURATION BLOCK.
          * Shared by all five steps; no settings need editing in the steps.
-         * Percentage ranges are deliberately unset, not recommendations.
+         * Percentage ranges below are illustrative samples, not measured baselines.
          * Use a verified healthy population to decide acceptable ranges.
          **************************************************************/
         this.config = {
@@ -27,14 +27,15 @@ VRRiskDataHealth.prototype = {
                 { field: 'active', operator: '=', value: true }
                 // Example: { field: 'source', operator: '=', value: 'YOUR_SOURCE' }
             ],
-            minimumRecords: 100, // Choose a meaningful minimum for this population.
+            minimumRecords: 40000000,
+            maximumRecords: 100000000,
 
             // 3. COUNT VARIANCE BETWEEN THE TWO QUERIES
-            // Allow the LARGER of this record allowance or this % of populationCount.
-            // 1 means 1%; fractional allowed counts round DOWN. Both 0 = exact match.
+            // Percentage of populationCount; 0 requires an exact match.
+            // 0.0125% = 5,000 records at 40 million; 12,500 at 100 million.
+            // Fractional allowed counts round DOWN.
             populationCountTolerance: {
-                maxDifferenceRecords: 0,
-                maxDifferencePercent: 1
+                maxDifferencePercent: 0.0125
             },
 
             // 4. SCORE DOMAIN, RATING MAPPING AND ACCEPTED PERCENTAGES
@@ -42,16 +43,19 @@ VRRiskDataHealth.prototype = {
             scoreMinimum: 0,
             scoreMaximum: 100,
             ratings: [
-                { value: '1', label: 'Critical', scoreMin: 90, scoreMax: 100, minPercent: null, maxPercent: null },
-                { value: '2', label: 'High',     scoreMin: 70, scoreMax: 89,  minPercent: null, maxPercent: null },
-                { value: '3', label: 'Medium',   scoreMin: 40, scoreMax: 69,  minPercent: null, maxPercent: null },
-                { value: '4', label: 'Low',      scoreMin: 1,  scoreMax: 39,  minPercent: null, maxPercent: null },
-                { value: '5', label: 'None',     scoreMin: 0,  scoreMax: 0,   minPercent: null, maxPercent: null }
+                { value: '1', label: 'Critical', scoreMin: 90, scoreMax: 100, minPercent: 0.1, maxPercent: 1.5 },
+                { value: '2', label: 'High',     scoreMin: 70, scoreMax: 89,  minPercent: 0.5, maxPercent: 5 },
+                { value: '3', label: 'Medium',   scoreMin: 40, scoreMax: 69,  minPercent: 10, maxPercent: 30 },
+                { value: '4', label: 'Low',      scoreMin: 1,  scoreMax: 39,  minPercent: 55, maxPercent: 85 },
+                { value: '5', label: 'None',     scoreMin: 0,  scoreMax: 0,   minPercent: 0, maxPercent: 10 }
             ],
             // 5. OPTIONAL MEAN-SCORE BOUNDS
             // Helps catch lower scores even within the same rating.
             // Both null disables this extra check; otherwise set BOTH bounds.
-            meanScore: { min: null, max: null }
+            meanScore: { min: null, max: null },
+
+            // 6. REPORT DISPLAY (comparisons always use full precision)
+            outputDecimals: 6
         };
         /**************** END OF ALL EDITABLE TEST SETTINGS ****************/
     },
@@ -68,46 +72,88 @@ VRRiskDataHealth.prototype = {
             var prefix = this.config.populationLabel + ' | VITs: ' + snapshot.total;
             if (snapshot.countDifference)
                 prefix += ' | Count variance: ' + snapshot.countDifference + ' (population: ' + snapshot.populationCount + '; allowed: ' + snapshot.allowedCountDifference + ')';
-            // A tolerance must not turn an empty or undersized query into a pass.
-            if (Math.min(snapshot.total, snapshot.populationCount) < this.config.minimumRecords)
-                return { passed: false, message: 'Fail | ' + prefix + ' | Insufficient data; minimum: ' + this.config.minimumRecords };
-            if (check === 'population')
-                return { passed: true, message: 'Pass | ' + prefix };
+            var failures = this._populationFailures(snapshot);
+            if (check === 'population') return this._result(prefix, failures);
 
-            var valueFailures = [];
-            if (snapshot.invalidScores) valueFailures.push('Missing/invalid scores: ' + snapshot.invalidScores);
-            if (snapshot.invalidRatings) valueFailures.push('Missing/invalid ratings: ' + snapshot.invalidRatings);
-            // Never calculate a healthy distribution by silently dropping bad data.
-            if (valueFailures.length)
-                return { passed: false, message: 'Fail | ' + prefix + ' | ' + valueFailures.join(' | ') };
-            if (check === 'values')
-                return { passed: true, message: 'Pass | ' + prefix + ' | Scores and ratings valid.' };
+            if (snapshot.invalidScores) failures.push('Missing/invalid scores: ' + snapshot.invalidScores);
+            if (snapshot.invalidRatings) failures.push('Missing/invalid ratings: ' + snapshot.invalidRatings);
+            if (check === 'values') return this._result(prefix, failures);
+            if (snapshot.mismatches) failures.push('Score/rating mismatches: ' + snapshot.mismatches);
+            if (check === 'consistency') return this._result(prefix, failures);
 
-            if (snapshot.mismatches)
-                return { passed: false, message: 'Fail | ' + prefix + ' | Score/rating mismatches: ' + snapshot.mismatches };
-            if (check === 'consistency')
-                return { passed: true, message: 'Pass | ' + prefix + ' | Score/rating bands match.' };
-
-            var failures = [];
-            var percentages = [];
+            // Step 5 always includes ALL five categories, even with prerequisite failures.
+            var rows = [];
             for (var i = 0; i < this.config.ratings.length; i++) {
                 var rating = this.config.ratings[i];
+                if (!snapshot.total) {
+                    rows.push(rating.label + ': unavailable | expected: ' + rating.minPercent + '-' + rating.maxPercent + '% | Fail | no grouped records');
+                    continue;
+                }
                 var percent = 100 * snapshot.ratingCounts[i] / snapshot.total;
-                percentages.push(rating.label + ': ' + percent.toFixed(2) + '%');
-                // Compare full precision; rounding is for display only.
-                if (percent < rating.minPercent || percent > rating.maxPercent)
-                    failures.push(rating.label + ': ' + percent.toFixed(4) + '% (' + snapshot.ratingCounts[i] + '/' + snapshot.total + '); expected ' + rating.minPercent + '-' + rating.maxPercent + '%');
+                var status = this._rangeStatus(percent, rating.minPercent, rating.maxPercent, 'percentage points');
+                rows.push(rating.label + ': ' + this._display(percent) + '% | expected: ' + rating.minPercent + '-' + rating.maxPercent +
+                    '% | ' + (status.passed ? 'Pass' : 'Fail') + ' | ' + status.detail + ' | count: ' + snapshot.ratingCounts[i] + '/' + snapshot.total);
+                if (!status.passed) failures.push(rating.label + ' outside expected range');
             }
-            var mean = snapshot.scoreSum / snapshot.total;
-            var bounds = this.config.meanScore;
-            if (bounds.min !== null && (mean < bounds.min || mean > bounds.max))
-                failures.push('Mean score: ' + mean.toFixed(4) + '; expected ' + bounds.min + '-' + bounds.max);
-            if (failures.length)
-                return { passed: false, message: 'Fail | ' + prefix + '\n' + failures.join('\n') };
-            return { passed: true, message: 'Pass | ' + prefix + ' | ' + percentages.join(' | ') + ' | Mean score: ' + mean.toFixed(2) + (bounds.min === null ? ' (informational)' : '') };
+            if (snapshot.total && !snapshot.invalidScores) {
+                var mean = snapshot.scoreSum / snapshot.total;
+                var bounds = this.config.meanScore;
+                if (bounds.min === null) rows.push('Mean score: ' + this._display(mean) + ' (informational)');
+                else {
+                    var meanStatus = this._rangeStatus(mean, bounds.min, bounds.max, 'score points');
+                    rows.push('Mean score: ' + this._display(mean) + ' | expected: ' + bounds.min + '-' + bounds.max +
+                        ' | ' + (meanStatus.passed ? 'Pass' : 'Fail') + ' | ' + meanStatus.detail);
+                    if (!meanStatus.passed) failures.push('Mean score outside expected range');
+                }
+            } else rows.push('Mean score: unavailable | Fail | missing/invalid scores or empty data');
+            return this._result(prefix, failures, rows);
         } catch (error) {
-            return { passed: false, message: 'Fail | ' + String(error.message || error) };
+            var message = 'Fail | ' + String(error.message || error);
+            if (check === 'distribution') {
+                var labels = ['Critical', 'High', 'Medium', 'Low', 'None'];
+                for (var i = 0; i < labels.length; i++) {
+                    var rating = this.config && this.config.ratings && this.config.ratings[i];
+                    var expected = rating ? rating.minPercent + '-' + rating.maxPercent + '%' : 'unavailable';
+                    message += '\n' + labels[i] + ': unavailable | expected: ' + expected + ' | Fail | check could not complete';
+                }
+            }
+            return { passed: false, message: message };
         }
+    },
+
+    _populationFailures: function(snapshot) {
+        var failures = [];
+        if (snapshot.countDifference > snapshot.allowedCountDifference)
+            failures.push('Population count variance exceeds tolerance; population: ' + snapshot.populationCount + ', grouped: ' + snapshot.total +
+                ', difference: ' + snapshot.countDifference + ', allowed: ' + snapshot.allowedCountDifference +
+                ' (' + this.config.populationCountTolerance.maxDifferencePercent + '%); above allowance by ' +
+                (snapshot.countDifference - snapshot.allowedCountDifference) + ' records');
+        var counts = [{ label: 'Population', value: snapshot.populationCount }, { label: 'Grouped', value: snapshot.total }];
+        for (var i = 0; i < counts.length; i++) {
+            var count = counts[i];
+            if (count.value < this.config.minimumRecords)
+                failures.push('Insufficient data | ' + count.label + ': ' + count.value + ' | minimum: ' + this.config.minimumRecords +
+                    ' | below min by ' + (this.config.minimumRecords - count.value) + ' records');
+            if (count.value > this.config.maximumRecords)
+                failures.push('Population too large | ' + count.label + ': ' + count.value + ' | maximum: ' + this.config.maximumRecords +
+                    ' | above max by ' + (count.value - this.config.maximumRecords) + ' records');
+        }
+        return failures;
+    },
+    _rangeStatus: function(value, min, max, units) {
+        // Percentage differences are percentage POINTS, not relative percent changes.
+        if (value < min) return { passed: false, detail: 'below min by ' + this._delta(min - value) + ' ' + units };
+        if (value > max) return { passed: false, detail: 'above max by ' + this._delta(value - max) + ' ' + units };
+        return { passed: true, detail: 'within range' };
+    },
+    _display: function(value) { return value.toFixed(this.config.outputDecimals); },
+    _delta: function(value) {
+        var displayed = this._display(value);
+        return Number(displayed) === 0 && value > 0 ? '<' + this._display(Math.pow(10, -this.config.outputDecimals)) : displayed;
+    },
+    _result: function(prefix, failures, rows) {
+        return { passed: failures.length === 0, message: (failures.length ? 'Fail' : 'Pass') + ' | ' + prefix +
+            (failures.length ? '\n' + failures.join('\n') : '') + (rows && rows.length ? '\n' + rows.join('\n') : '') };
     },
 
     _validateConfiguration: function() {
@@ -116,10 +162,12 @@ VRRiskDataHealth.prototype = {
             throw new Error('Review ALL TEST SETTINGS in initialize, including count tolerance; then set configurationReviewed to true.');
         if (!this._integer(config.minimumRecords) || config.minimumRecords < 1)
             throw new Error('minimumRecords must be a positive integer.');
+        if (!this._integer(config.maximumRecords) || config.maximumRecords < config.minimumRecords)
+            throw new Error('maximumRecords must be an integer greater than or equal to minimumRecords.');
+        if (!this._integer(config.outputDecimals) || config.outputDecimals < 0 || config.outputDecimals > 10)
+            throw new Error('outputDecimals must be an integer from 0 through 10.');
         var tolerance = config.populationCountTolerance;
-        if (!tolerance || !this._integer(tolerance.maxDifferenceRecords) || tolerance.maxDifferenceRecords < 0)
-            throw new Error('populationCountTolerance.maxDifferenceRecords must be a nonnegative integer.');
-        if (typeof tolerance.maxDifferencePercent !== 'number' || !isFinite(tolerance.maxDifferencePercent) ||
+        if (!tolerance || typeof tolerance.maxDifferencePercent !== 'number' || !isFinite(tolerance.maxDifferencePercent) ||
             tolerance.maxDifferencePercent < 0 || tolerance.maxDifferencePercent > 100)
             throw new Error('populationCountTolerance.maxDifferencePercent must be a number from 0 through 100.');
         if (!this._integer(config.scoreMinimum) || !this._integer(config.scoreMaximum) || config.scoreMinimum < 0 || config.scoreMinimum >= config.scoreMaximum)
@@ -225,12 +273,7 @@ VRRiskDataHealth.prototype = {
         var tolerance = config.populationCountTolerance;
         snapshot.populationCount = populationCount;
         snapshot.countDifference = Math.abs(snapshot.total - populationCount);
-        snapshot.allowedCountDifference = Math.max(tolerance.maxDifferenceRecords,
-            Math.floor(populationCount * tolerance.maxDifferencePercent / 100));
-        if (snapshot.countDifference > snapshot.allowedCountDifference)
-            throw new Error('Population count variance exceeds tolerance; population: ' + populationCount + ', grouped: ' + snapshot.total +
-                ', difference: ' + snapshot.countDifference + ', allowed: ' + snapshot.allowedCountDifference +
-                '. Configure populationCountTolerance in ALL TEST SETTINGS or retry after imports and recalculation finish.');
+        snapshot.allowedCountDifference = Math.floor(populationCount * tolerance.maxDifferencePercent / 100);
         // All rating percentages and the mean use this SAME grouped snapshot total.
         return snapshot;
     },

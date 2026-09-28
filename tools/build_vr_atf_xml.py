@@ -13,15 +13,18 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 ATF = ROOT / "Scripts" / "ATF"
 OUTPUT = ATF / "VR_Risk_Data_Health_ATF.update-set.xml"
-NAME = "VR - Risk score and rating health"
-STAMP = "2026-09-25 19:02:37"
-PACKAGE_REVISION = "v2"  # New envelope IDs; test/helper/step IDs stay stable.
+NAME = "CMPNY VR: Risk score and rating health - USEM"
+SCOPE_ID = "054cdcc2ff200200158bffffffffff94"
+SCOPE = "sn_vul"
+SCOPE_LABEL = "Vulnerability Response"
+STAMP = "2026-09-28 00:00:00"
+PACKAGE_REVISION = "v3"  # First sn_vul package; distinct from legacy Global IDs.
 STEP_CONFIG = "41de4a935332120028bc29cac2dc349a"
 JASMINE_INPUT = "42f2564b73031300440211d8faf6a777"
 SCRIPT_INPUT = "989d9e235324220002c6435723dc3484"
 STEPS = [
     ("configuration", "Configuration and fields"),
-    ("population", "Population size"),
+    ("population", "Population bounds"),
     ("values", "Score and rating values"),
     ("consistency", "Score/rating consistency"),
     ("distribution", "Rating distribution"),
@@ -30,7 +33,7 @@ STEPS = [
 
 def guid(name):
     """Stable IDs make rebuilding/reimporting update the same owned artifacts."""
-    return sha256(("petroskyluke/servicenow-health-check/vr-atf/v1/" + name).encode()).hexdigest()[:32]
+    return sha256(("petroskyluke/servicenow-health-check/vr-atf/sn_vul/v1/" + name).encode()).hexdigest()[:32]
 
 
 def field(parent, name, value="", **attributes):
@@ -54,8 +57,8 @@ def metadata(record, table, identity, name):
         "sys_updated_on": STAMP,
     }.items():
         field(record, key, value)
-    field(record, "sys_scope", "global", display_value="Global")
-    field(record, "sys_package", "global", display_value="Global", source="global")
+    field(record, "sys_scope", SCOPE_ID, display_value=SCOPE_LABEL)
+    field(record, "sys_package", SCOPE_ID, display_value=SCOPE_LABEL, source=SCOPE)
 
 
 def payload(table, identity, name, values):
@@ -74,10 +77,10 @@ def build():
     for key, value in {
         "sys_id": remote_id,
         "name": NAME + " - " + PACKAGE_REVISION,
-        "description": "One Global ATF test, five Run Server Side Script steps and VRRiskDataHealth. Configure percentage ranges before running; add to an existing suite. Reads VIT data only.",
-        "application": "global",
-        "application_name": "Global",
-        "application_scope": "global",
+        "description": "One Vulnerability Response ATF test, five Run Server Side Script steps and VRRiskDataHealth. Review sample percentage ranges before running; add to an existing suite. Reads VIT data only.",
+        "application": SCOPE_ID,
+        "application_name": SCOPE_LABEL,
+        "application_scope": SCOPE,
         "remote_sys_id": guid(PACKAGE_REVISION + "/source-update-set"),
         "state": "loaded",
         "sys_created_by": "repository",
@@ -93,7 +96,7 @@ def build():
         for key, value in {
             "sys_id": guid(PACKAGE_REVISION + "/update/" + identity),
             "action": "INSERT_OR_UPDATE",
-            "application": "global",
+            "application": SCOPE_ID,
             "category": "customer",
             "name": table + "_" + identity,
             # Escaped XML preserves JavaScript through both parse layers.
@@ -114,7 +117,7 @@ def build():
     include_id = guid("script-include")
     helper = payload("sys_script_include", include_id, "VRRiskDataHealth", {
         "name": "VRRiskDataHealth",
-        "api_name": "global.VRRiskDataHealth",
+        "api_name": "sn_vul.VRRiskDataHealth",
         "active": "true",
         "access": "package_private",
         "client_callable": "false",

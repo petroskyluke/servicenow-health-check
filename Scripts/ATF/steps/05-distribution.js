@@ -1,6 +1,6 @@
-// ATF step 5: check all five percentage ranges and optional mean-score bounds.
+// ATF step 5: report all five actual/expected percentages, results and breach deltas.
 (function(outputs, steps, stepResult, assertEqual) {
-    var result = new VRRiskDataHealth().run('distribution');
+    var result = new sn_vul.VRRiskDataHealth().run('distribution');
     stepResult.setOutputMessage(result.message);
     assertEqual({ name: 'VR risk health rating distribution', shouldbe: true, value: result.passed });
     return result.passed;

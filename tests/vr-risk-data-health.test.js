@@ -52,7 +52,7 @@ function setup(rows = healthy, options = {}) {
             if (options.queryError && (!options.queryErrorGroupOnly || this.groups.length)) throw new Error('Query denied');
             const selected = rows.filter(row => this.filters.every(filter => matches(row, filter)));
             if (!this.groups.length) {
-                this.results = [{ count: options.populationCount === undefined ? String(selected.length) : options.populationCount }];
+                this.results = [{ count: options.populationCount === undefined ? String(selected.reduce((total, row) => total + (row._weight || 1), 0)) : options.populationCount }];
                 return;
             }
             const buckets = new Map();
@@ -60,7 +60,7 @@ function setup(rows = healthy, options = {}) {
                 if (options.omitNullGroups && this.groups.some(field => row[field] == null || row[field] === '')) continue;
                 const key = JSON.stringify(this.groups.map(field => row[field] ?? null));
                 if (!buckets.has(key)) buckets.set(key, { ...row, count: 0 });
-                buckets.get(key).count++;
+                buckets.get(key).count += row._weight || 1;
             }
             this.results = [...buckets.values()].map(row => ({ ...row, count: String(row.count) }));
             if (options.groupCount !== undefined && this.results.length) this.results[0].count = options.groupCount;
@@ -82,6 +82,7 @@ function setup(rows = healthy, options = {}) {
     if (!options.defaultConfig) {
         helper.config.configurationReviewed = true;
         helper.config.minimumRecords = 1;
+        helper.config.populationCountTolerance.maxDifferencePercent = 1;
         helper.config.ratings.forEach(rating => { rating.minPercent = 0; rating.maxPercent = 100; });
     }
     return {
@@ -114,8 +115,8 @@ test('all five checks accept configured healthy data', () => {
     for (const check of checks) pass(environment.run(check));
     const report = environment.run('distribution').message;
     assert.match(report, /VITs: 5/);
-    for (const label of ['Critical', 'High', 'Medium', 'Low', 'None']) assert.ok(report.includes(label + ': 20.00%'));
-    assert.match(report, /Mean score: 48.00 \(informational\)/);
+    for (const label of ['Critical', 'High', 'Medium', 'Low', 'None']) assert.ok(report.includes(label + ': 20.000000%'));
+    assert.match(report, /Mean score: 48.000000 \(informational\)/);
 });
 
 test('default configuration cannot pass or query data', () => {
@@ -123,7 +124,11 @@ test('default configuration cannot pass or query data', () => {
     for (const check of checks) fail(environment.run(check), /configurationReviewed/);
     assert.equal(environment.queries.length, 0);
     environment.helper.config.configurationReviewed = true;
-    fail(environment.run('configuration'), /minPercent and maxPercent/);
+    pass(environment.run('configuration'));
+    assert.equal(environment.helper.config.minimumRecords, 40000000);
+    assert.equal(environment.helper.config.maximumRecords, 100000000);
+    assert.equal(environment.helper.config.populationCountTolerance.maxDifferencePercent, 0.0125);
+    assert.ok(environment.helper.config.ratings.every(r => typeof r.minPercent === 'number' && typeof r.maxPercent === 'number'));
     assert.equal(environment.queries.length, 0);
 });
 
@@ -146,10 +151,12 @@ test('invalid configuration and schema fail before database queries', () => {
         config => { config.minimumRecords = 0; },
         config => { config.minimumRecords = 1.5; },
         config => { delete config.populationCountTolerance; },
-        config => { config.populationCountTolerance.maxDifferenceRecords = -1; },
-        config => { config.populationCountTolerance.maxDifferenceRecords = 1.5; },
-        config => { config.populationCountTolerance.maxDifferenceRecords = '1'; },
-        config => { config.populationCountTolerance.maxDifferenceRecords = Infinity; },
+        config => { config.maximumRecords = 0; },
+        config => { config.maximumRecords = 1.5; },
+        config => { config.maximumRecords = Infinity; },
+        config => { config.outputDecimals = -1; },
+        config => { config.outputDecimals = 11; },
+        config => { config.outputDecimals = '6'; },
         config => { config.populationCountTolerance.maxDifferencePercent = null; },
         config => { config.populationCountTolerance.maxDifferencePercent = '1'; },
         config => { config.populationCountTolerance.maxDifferencePercent = NaN; },
@@ -229,22 +236,22 @@ test('score/rating mismatch cannot pass distribution', () => {
 test('all-zero None data and absent expected categories are detected', () => {
     const environment = setup([vit('0', '5'), vit('0', '5')]);
     environment.helper.config.ratings[4].maxPercent = 10;
-    fail(environment.run('distribution'), /None: 100\.0000% \(2\/2\); expected 0-10%/);
+    fail(environment.run('distribution'), /None: 100\.000000% \| expected: 0-10% \| Fail \| above max by 90\.000000 percentage points/);
     const missing = setup([vit('20', '4')]);
     missing.helper.config.ratings[0].minPercent = 1;
-    fail(missing.run('distribution'), /Critical: 0\.0000% \(0\/1\); expected 1-100%/);
+    fail(missing.run('distribution'), /Critical: 0\.000000% \| expected: 1-100% \| Fail \| below min by 1\.000000 percentage points/);
 });
 
 test('percentage comparisons are inclusive and use unrounded values', () => {
     const environment = setup([vit('95', '1'), vit('0', '5'), vit('0', '5')]);
     environment.helper.config.ratings[0].maxPercent = 33.33;
-    fail(environment.run('distribution'), /Critical: 33\.3333%/);
+    fail(environment.run('distribution'), /Critical: 33\.333333%/);
     environment.helper.config.ratings[0].minPercent = 100 / 3;
     environment.helper.config.ratings[0].maxPercent = 100 / 3;
     pass(environment.run('distribution'));
     environment.helper.config.ratings[0].minPercent = 33.334;
     environment.helper.config.ratings[0].maxPercent = 100;
-    fail(environment.run('distribution'), /Critical: 33\.3333%/);
+    fail(environment.run('distribution'), /Critical: 33\.333333%/);
 });
 
 test('optional mean weights repeated scores by record count and honors inclusive bounds', () => {
@@ -252,11 +259,11 @@ test('optional mean weights repeated scores by record count and honors inclusive
     environment.helper.config.meanScore = { min: 10, max: 10 };
     const result = environment.run('distribution');
     pass(result);
-    assert.match(result.message, /Mean score: 10\.00$/);
+    assert.match(result.message, /Mean score: 10\.000000 \| expected: 10-10 \| Pass/);
     environment.helper.config.meanScore = { min: 10.01, max: 100 };
-    fail(environment.run('distribution'), /Mean score: 10\.0000; expected 10.01-100/);
+    fail(environment.run('distribution'), /Mean score: 10\.000000 \| expected: 10.01-100 \| Fail \| below min by 0\.010000/);
     environment.helper.config.meanScore = { min: 0, max: 9.99 };
-    fail(environment.run('distribution'), /Mean score: 10\.0000; expected 0-9.99/);
+    fail(environment.run('distribution'), /Mean score: 10\.000000 \| expected: 0-9.99 \| Fail \| above max by 0\.010000/);
 });
 
 test('database failures cannot produce a green result', () => {
@@ -284,7 +291,7 @@ test('ungrouped count detects omitted null groups and population changes', () =>
     }
 });
 
-test('default 1% count tolerance accepts inclusive differences in both directions', () => {
+test('configured 1% count tolerance accepts inclusive differences in both directions', () => {
     for (const length of [99, 100, 101]) {
         const environment = setup(Array.from({ length }, () => vit('50', '3')), { populationCount: '100' });
         for (const check of checks.slice(1)) {
@@ -299,24 +306,17 @@ test('default 1% count tolerance accepts inclusive differences in both direction
     }
 });
 
-test('absolute count allowance, strict mode and larger-of semantics are configurable', () => {
+test('percentage-only allowance and strict mode are configurable', () => {
     const environment = setup(healthy, { populationCount: '8' });
-    environment.helper.config.populationCountTolerance = { maxDifferenceRecords: 3, maxDifferencePercent: 0 };
+    environment.helper.config.populationCountTolerance = { maxDifferencePercent: 37.5 };
     pass(environment.run('population'));
-    environment.helper.config.populationCountTolerance.maxDifferenceRecords = 2;
+    environment.helper.config.populationCountTolerance.maxDifferencePercent = 25;
     fail(environment.run('population'), /difference: 3, allowed: 2/);
-    environment.helper.config.populationCountTolerance = { maxDifferenceRecords: 0, maxDifferencePercent: 0 };
+    environment.helper.config.populationCountTolerance.maxDifferencePercent = 0;
     fail(environment.run('population'), /difference: 3, allowed: 0/);
-    pass(setup(healthy).run('population'));
-
-    const percent = setup(Array.from({ length: 95 }, () => vit('50', '3')), { populationCount: '100' });
-    percent.helper.config.populationCountTolerance = { maxDifferenceRecords: 2, maxDifferencePercent: 5 };
-    pass(percent.run('population'));
-    // The limits are not added: 2 records + 3% must not allow a difference of 5.
-    percent.helper.config.populationCountTolerance.maxDifferencePercent = 3;
-    fail(percent.run('population'), /difference: 5, allowed: 3/);
-    percent.helper.config.populationCountTolerance = { maxDifferenceRecords: 5, maxDifferencePercent: 1 };
-    pass(percent.run('population'));
+    const exact = setup(healthy);
+    exact.helper.config.populationCountTolerance.maxDifferencePercent = 0;
+    pass(exact.run('population'));
 });
 
 test('fractional percentage tolerances use the baseline count and round down', () => {
@@ -330,13 +330,13 @@ test('fractional percentage tolerances use the baseline count and round down', (
 test('tolerated differences never bypass minimum size, empty data or invalid values', () => {
     for (const [rows, populationCount] of [[[], '5'], [healthy, '0'], [healthy, '4'], [healthy.slice(0, 4), '5']]) {
         const environment = setup(rows, { populationCount });
-        environment.helper.config.populationCountTolerance.maxDifferenceRecords = 100;
+        environment.helper.config.populationCountTolerance.maxDifferencePercent = 100;
         environment.helper.config.minimumRecords = 5;
         for (const check of checks.slice(1)) fail(environment.run(check), /Insufficient data/);
     }
     for (const bad of [vit(null, '5'), vit('0', null), vit('89', '1')]) {
         const environment = setup([...healthy, bad], { populationCount: '5' });
-        environment.helper.config.populationCountTolerance.maxDifferenceRecords = 1;
+        environment.helper.config.populationCountTolerance.maxDifferencePercent = 20;
         pass(environment.run('population'));
         fail(environment.run('distribution'), /Missing\/invalid|mismatches/);
     }
@@ -345,7 +345,7 @@ test('tolerated differences never bypass minimum size, empty data or invalid val
 test('distribution and mean use the grouped denominator after accepting count variance', () => {
     const environment = setup([vit('100', '1'), ...Array.from({ length: 98 }, () => vit('0', '5'))], { populationCount: '100' });
     environment.helper.config.ratings[0].maxPercent = 1.005;
-    fail(environment.run('distribution'), /Critical: 1\.0101% \(1\/99\)/);
+    fail(environment.run('distribution'), /Critical: 1\.010101%.*count: 1\/99/);
     environment.helper.config.ratings[0].maxPercent = 100;
     environment.helper.config.meanScore = { min: 100 / 99, max: 100 / 99 };
     const result = environment.run('distribution');
@@ -379,4 +379,99 @@ test('unknown checks fail without querying or mutating records', () => {
     assert.equal(environment.queries.length, 0);
 });
 
-console.log('Passed: ' + tested + ' VR risk health scenarios, including configuration, five ATF checks, null handling, thresholds, weighted mean, count reconciliation, filters and read-only behavior.');
+test('40-million minimum and 100-million maximum apply to both counts inclusively', () => {
+    for (const [count, expected] of [[39999999, false], [40000000, true], [100000000, true], [100000001, false]]) {
+        const environment = setup([vit('50', '3', { _weight: count })], { defaultConfig: true });
+        environment.helper.config.configurationReviewed = true;
+        const result = environment.run('population');
+        assert.equal(result.passed, expected, result.message);
+        if (count === 39999999) assert.match(result.message, /below min by 1 records/);
+        if (count === 100000001) assert.match(result.message, /above max by 1 records/);
+    }
+    for (const [grouped, population] of [[100000000, '100000001'], [100000001, '100000000']]) {
+        const environment = setup([vit('50', '3', { _weight: grouped })], { populationCount: population, defaultConfig: true });
+        environment.helper.config.configurationReviewed = true;
+        fail(environment.run('population'), /above max by 1 records/);
+    }
+});
+
+test('default population tolerance scales from 5000 at 40 million to 12500 at 100 million', () => {
+    for (const [population, difference, expected] of [[40000000, 5000, true], [40000000, 5001, false], [100000000, -12500, true], [100000000, -12501, false]]) {
+        const environment = setup([vit('50', '3', { _weight: population + difference })], { populationCount: String(population), defaultConfig: true });
+        environment.helper.config.configurationReviewed = true;
+        const result = environment.run('population');
+        assert.equal(result.passed, expected, result.message);
+        if (!expected) assert.match(result.message, /above allowance by 1 records/);
+    }
+});
+
+test('illustrative sample mix passes with the actual default percentage ranges', () => {
+    const rows = [vit('95', '1', { _weight: 200000 }), vit('75', '2', { _weight: 800000 }),
+        vit('50', '3', { _weight: 8000000 }), vit('20', '4', { _weight: 29000000 }), vit('0', '5', { _weight: 2000000 })];
+    const environment = setup(rows, { defaultConfig: true });
+    environment.helper.config.configurationReviewed = true;
+    for (const check of checks) pass(environment.run(check));
+    const report = environment.run('distribution').message;
+    for (const label of ['Critical', 'High', 'Medium', 'Low', 'None']) {
+        assert.match(report, new RegExp('^' + label + ': .*% \\| expected: .*% \\| Pass \\| within range', 'm'));
+    }
+});
+
+test('step 5 lists all ratings and precise upper/lower percentage-point deltas on failure', () => {
+    const environment = setup([vit('75', '2', { _weight: 7123123 }), vit('20', '4', { _weight: 92876877 })]);
+    environment.helper.config.ratings[1].minPercent = 0.5;
+    environment.helper.config.ratings[1].maxPercent = 1.5;
+    environment.helper.config.ratings[0].minPercent = 0.1;
+    const result = environment.run('distribution');
+    fail(result);
+    assert.match(result.message, /High: 7\.123123% \| expected: 0.5-1.5% \| Fail \| above max by 5\.623123 percentage points/);
+    assert.match(result.message, /Critical: 0\.000000% \| expected: 0.1-100% \| Fail \| below min by 0\.100000 percentage points/);
+    for (const label of ['Critical', 'High', 'Medium', 'Low', 'None']) {
+        assert.equal(result.message.split('\n').filter(line => line.startsWith(label + ': ')).length, 1);
+    }
+    assert.match(result.message, /Low: .* \| Pass \| within range/);
+});
+
+test('step 5 still reports all categories with insufficient, invalid or unavailable data', () => {
+    const cases = [setup([], {}), setup(healthy, { queryError: true }), setup(healthy, { defaultConfig: true }),
+        setup([...healthy, vit(null, null)]), setup(healthy, { populationCount: '20' })];
+    for (const environment of cases) {
+        const result = environment.run('distribution');
+        fail(result);
+        for (const label of ['Critical', 'High', 'Medium', 'Low', 'None'])
+            assert.match(result.message, new RegExp('^' + label + ': .*\\| expected: .*\\| (Pass|Fail)', 'm'));
+    }
+    assert.match(cases[1].run('distribution').message, /High: unavailable/);
+});
+
+test('tiny breaches are not displayed as a zero delta', () => {
+    const environment = setup([vit('95', '1'), vit('0', '5'), vit('0', '5')]);
+    environment.helper.config.ratings[0].maxPercent = (100 / 3) - 1e-8;
+    fail(environment.run('distribution'), /above max by <0\.000001 percentage points/);
+});
+
+test('every ATF wrapper calls the VR-scoped helper and asserts the actual result', () => {
+    const stepDirectory = path.join(__dirname, '../Scripts/ATF/steps');
+    for (const file of fs.readdirSync(stepDirectory).filter(file => file.endsWith('.js'))) {
+        const check = file.replace(/^\d+-/, '').replace(/\.js$/, '');
+        for (const passed of [true, false]) {
+            const messages = [];
+            const context = {
+                sn_vul: { VRRiskDataHealth: function() { this.run = name => {
+                    assert.equal(name, check);
+                    return { passed, message: 'scoped result' };
+                }; } },
+                VRRiskDataHealth: function() { throw new Error('Wrong Global helper'); },
+                outputs: {}, steps: () => {},
+                stepResult: { setOutputMessage: message => messages.push(message) },
+                assertEqual: assertion => assert.equal(assertion.value, assertion.shouldbe)
+            };
+            const execute = () => vm.runInNewContext(fs.readFileSync(path.join(stepDirectory, file), 'utf8'), context);
+            if (passed) assert.equal(execute(), true);
+            else assert.throws(execute, assert.AssertionError);
+            assert.deepEqual(messages, ['scoped result']);
+        }
+    }
+});
+
+console.log('Passed: ' + tested + ' VR risk health scenarios, including enterprise population bounds, percentage variance, all-rating reports, deltas, query errors and read-only behavior.');

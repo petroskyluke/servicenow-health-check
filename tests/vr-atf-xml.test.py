@@ -17,6 +17,7 @@ XML_FILE = ATF / "VR_Risk_Data_Health_ATF.update-set.xml"
 STEP_CONFIG_ID = "41de4a935332120028bc29cac2dc349a"
 SCRIPT_VARIABLE_ID = "989d9e235324220002c6435723dc3484"
 JASMINE_VARIABLE_ID = "42f2564b73031300440211d8faf6a777"
+VR_SCOPE_ID = "054cdcc2ff200200158bffffffffff94"
 CHECKS = ("configuration", "population", "values", "consistency", "distribution")
 
 
@@ -42,12 +43,14 @@ class ATFXMLTests(unittest.TestCase):
         remote = self.root.find("sys_remote_update_set")
         self.assertEqual(remote.get("action"), "INSERT_OR_UPDATE")
         self.assertEqual(remote.findtext("state"), "loaded")
-        self.assertEqual(remote.findtext("application"), "global")
+        self.assertEqual(remote.findtext("application"), VR_SCOPE_ID)
+        self.assertEqual(remote.findtext("application_scope"), "sn_vul")
+        self.assertEqual(remote.findtext("application_name"), "Vulnerability Response")
         for update, payload in zip(self.updates, self.payloads):
             self.assertEqual(update.get("action"), "INSERT_OR_UPDATE")
             self.assertEqual(update.findtext("action"), "INSERT_OR_UPDATE")
             self.assertEqual(update.findtext("category"), "customer")
-            self.assertEqual(update.findtext("application"), "global")
+            self.assertEqual(update.findtext("application"), VR_SCOPE_ID)
             self.assertEqual(update.findtext("remote_update_set"), remote.findtext("sys_id"))
             self.assertEqual(payload.tag, "record_update")
             table = payload.get("table")
@@ -56,32 +59,37 @@ class ATFXMLTests(unittest.TestCase):
             record = payload.find(table)
             self.assertEqual(update.findtext("name"), table + "_" + record.findtext("sys_id"))
 
-    def test_all_metadata_and_steps_are_active_global_records(self):
+    def test_all_metadata_and_steps_are_active_vulnerability_response_records(self):
         for payload in self.payloads:
             table = payload.get("table")
             record = payload.find(table)
             self.assertEqual(record.get("action"), "INSERT_OR_UPDATE")
             self.assertEqual(record.get("apply_defaults"), "true")
-            self.assertEqual(record.findtext("sys_scope"), "global")
-            self.assertEqual(record.findtext("sys_package"), "global")
+            self.assertEqual(record.findtext("sys_scope"), VR_SCOPE_ID)
+            self.assertEqual(record.findtext("sys_package"), VR_SCOPE_ID)
+            self.assertEqual(record.find("sys_package").get("source"), "sn_vul")
             self.assertEqual(record.findtext("sys_class_name"), table)
             self.assertEqual(record.findtext("active"), "true")
             self.assertEqual(record.findtext("sys_update_name"), table + "_" + record.findtext("sys_id"))
         test = self.records("sys_atf_test")[0]
-        self.assertEqual(test.findtext("name"), "VR - Risk score and rating health")
+        self.assertEqual(test.findtext("name"), "CMPNY VR: Risk score and rating health - USEM")
         self.assertEqual(test.findtext("fail_on_server_error"), "true")
         self.assertEqual(test.findtext("enable_parameterized_testing"), "false")
 
     def test_script_include_is_server_only_and_matches_reviewed_source(self):
         record = self.records("sys_script_include")[0]
         self.assertEqual(record.findtext("name"), "VRRiskDataHealth")
-        self.assertEqual(record.findtext("api_name"), "global.VRRiskDataHealth")
+        self.assertEqual(record.findtext("api_name"), "sn_vul.VRRiskDataHealth")
         self.assertEqual(record.findtext("client_callable"), "false")
         self.assertEqual(record.findtext("access"), "package_private")
         source = (ATF / "VRRiskDataHealth.js").read_text(encoding="utf-8")
         self.assertEqual(record.findtext("script"), source)
         self.assertIn("configurationReviewed: false", source)
-        self.assertEqual(source.count("minPercent: null, maxPercent: null"), 5)
+        self.assertNotIn("minPercent: null", source)
+        self.assertIn("minimumRecords: 40000000", source)
+        self.assertIn("maximumRecords: 100000000", source)
+        self.assertIn("maxDifferencePercent: 0.0125", source)
+        self.assertNotIn("maxDifferenceRecords", source)
         # Supplemental static guard; behavior tests cover the mock API boundary.
         self.assertIsNone(re.search(r"\.(?:insert|update|updateMultiple|deleteRecord|deleteMultiple)\s*\(", source))
 
@@ -113,6 +121,8 @@ class ATFXMLTests(unittest.TestCase):
             source = (ATF / "steps" / f"{order:02}-{check}.js").read_text(encoding="utf-8")
             self.assertEqual(by_variable[SCRIPT_VARIABLE_ID].findtext("value"), source)
             self.assertIn(".run('" + check + "')", source)
+            self.assertIn("new sn_vul.VRRiskDataHealth()", source)
+            self.assertNotIn("new global.", source)
             self.assertIn("assertEqual", source)
         self.assertEqual(len(self.records("sys_variable_value")), 15)  # 10 inputs + 5 scoped cleanup actions
 
