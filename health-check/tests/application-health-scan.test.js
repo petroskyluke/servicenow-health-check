@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../Scripts/USEM_HC_ApplicationHealthScan.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../scripts/USEM_HC_ApplicationHealthScan.js'), 'utf8');
 const tables = ['sys_script_client', 'sys_script', 'sys_ui_action', 'sys_script_include', 'sysauto_script'];
 
 function run(apps, data = {}, invalid = [], missingFields = {}, queryErrors = [], scriptSource = source) {

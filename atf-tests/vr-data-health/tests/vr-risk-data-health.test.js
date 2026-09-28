@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../Scripts/ATF/VRRiskDataHealth.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../VRRiskDataHealth.js'), 'utf8');
 
 const vit = (score, rating, extra = {}) => ({ active: true, source: 'scanner-a', risk_score: score, risk_rating: rating, ...extra });
 const healthy = [vit('95', '1'), vit('75', '2'), vit('50', '3'), vit('20', '4'), vit('0', '5')];
@@ -568,7 +568,7 @@ test('accepted mismatches never suppress other checks or distribution reporting'
 });
 
 test('every ATF wrapper calls the VR-scoped helper and asserts the actual result', () => {
-    const stepDirectory = path.join(__dirname, '../Scripts/ATF/steps');
+    const stepDirectory = path.join(__dirname, '../steps');
     for (const file of fs.readdirSync(stepDirectory).filter(file => file.endsWith('.js'))) {
         const check = file.replace(/^\d+-/, '').replace(/\.js$/, '');
         for (const passed of [true, false]) {

@@ -1,3 +1,9 @@
+# Repository organization
+
+- Keep application health-check scripts and their documentation/tests under `health-check/`.
+- Keep each ATF test in its own folder under `atf-tests/`, including its XML, source, step scripts, documentation, build tools and local tests. The VR risk data health test lives in `atf-tests/vr-data-health/`.
+- Preserve the ATF builder's legacy ID seed when renaming or reorganizing the repository; changing it would create duplicate ServiceNow records.
+
 # VR / USEM test conventions
 
 - Name every VR/USEM ATF test `CMPNY VR: <TEST NAME> - USEM`.

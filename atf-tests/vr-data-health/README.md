@@ -117,14 +117,13 @@ Database aggregation covers the whole filtered population. The four data steps i
 - [ServiceNow's published update-set example](https://github.com/ServiceNow/example-restclient-myworkapp-nodejs/blob/6e4b93759c45b1d33a2515e40af049f6b784d8f0/mywork_update_set/sys_remote_update_set_2f48a7d74f4652002fa02f1e0210c785.xml): XML envelope format.
 - [ServiceNow employee's exported VR record](https://www.servicenow.com/community/app-engine-forum/helpers-translate-not-working/td-p/3323960): `sn_vul` scope/package reference `054cdcc2ff200200158bffffffffff94`. Confirm this dependency resolves during preview on your instance.
 
-Rebuild the XML after editing source:
+From this `atf-tests/vr-data-health` directory, rebuild the XML after editing source:
 
 ```sh
 python3 tools/build_vr_atf_xml.py
 python3 tools/build_vr_atf_xml.py --check
 python3 tests/vr-atf-xml.test.py
 node tests/vr-risk-data-health.test.js
-node tests/application-health-scan.test.js
 ```
 
 Local tests use mocked ServiceNow APIs, including compressed aggregate fixtures for enterprise-sized populations. Live XML import, scoped execution and runtime validation are still required.

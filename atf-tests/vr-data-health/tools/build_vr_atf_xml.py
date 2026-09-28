@@ -10,8 +10,7 @@ from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
 
-ROOT = Path(__file__).resolve().parents[1]
-ATF = ROOT / "Scripts" / "ATF"
+ATF = Path(__file__).resolve().parents[1]
 OUTPUT = ATF / "VR_Risk_Data_Health_ATF.update-set.xml"
 NAME = "CMPNY VR: Risk score and rating health - USEM"
 SCOPE_ID = "054cdcc2ff200200158bffffffffff94"
@@ -33,6 +32,7 @@ STEPS = [
 
 def guid(name):
     """Stable IDs make rebuilding/reimporting update the same owned artifacts."""
+    # Legacy repository name is an immutable ID seed; do not rename it.
     return sha256(("petroskyluke/servicenow-health-check/vr-atf/sn_vul/v1/" + name).encode()).hexdigest()[:32]
 
 

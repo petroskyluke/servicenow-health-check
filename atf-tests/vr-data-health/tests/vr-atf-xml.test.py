@@ -11,8 +11,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 
-ROOT = Path(__file__).resolve().parents[1]
-ATF = ROOT / "Scripts" / "ATF"
+ATF = Path(__file__).resolve().parents[1]
 XML_FILE = ATF / "VR_Risk_Data_Health_ATF.update-set.xml"
 STEP_CONFIG_ID = "41de4a935332120028bc29cac2dc349a"
 SCRIPT_VARIABLE_ID = "989d9e235324220002c6435723dc3484"
