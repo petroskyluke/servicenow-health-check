@@ -14,6 +14,7 @@ let tested = 0;
 function setup(rows = healthy, options = {}) {
     const originalRows = JSON.stringify(rows);
     const queries = [];
+    const propertyReads = [];
     const writes = [];
     const fields = new Set(['active', 'source', 'risk_score', 'risk_rating', 'sys_created_on', 'sys_id']);
     const stringify = value => value === null || value === undefined ? '' : String(value);
@@ -73,6 +74,13 @@ function setup(rows = healthy, options = {}) {
         GlideRecord.prototype[method] = function() { writes.push(method); throw new Error('Health checks must not mutate records'); };
     }
     const context = vm.createContext({
+        gs: { getProperty(key, fallback) {
+            propertyReads.push(key);
+            assert.equal(key, 'instance_name');
+            assert.equal(fallback, '');
+            if (options.propertyError) throw new Error('Instance property unavailable');
+            return options.instanceName === undefined ? 'TEST' : options.instanceName;
+        } },
         GlideRecord,
         GlideAggregate,
         Class: { create: () => function() { this.initialize.apply(this, arguments); } }
@@ -86,7 +94,7 @@ function setup(rows = healthy, options = {}) {
         helper.config.ratings.forEach(rating => { rating.minPercent = 0; rating.maxPercent = 100; });
     }
     return {
-        helper, queries,
+        helper, queries, propertyReads,
         run(check) {
             const result = helper.run(check);
             assert.equal(typeof result.passed, 'boolean');
@@ -448,6 +456,115 @@ test('tiny breaches are not displayed as a zero delta', () => {
     const environment = setup([vit('95', '1'), vit('0', '5'), vit('0', '5')]);
     environment.helper.config.ratings[0].maxPercent = (100 / 3) - 1e-8;
     fail(environment.run('distribution'), /above max by <0\.000001 percentage points/);
+});
+
+const mismatchPopulation = (total, mismatches) => [
+    ...(mismatches ? [vit('89', '1', { _weight: mismatches })] : []),
+    vit('50', '3', { _weight: total - mismatches })
+];
+
+test('Dev and Eng allow the inclusive percentage limit and expose actual and allowed counts', () => {
+    for (const instanceName of ['DEV', 'ENG', ' dev ', 'eng']) {
+        for (const [total, allowed] of [[40000000, 8], [100000000, 20]]) {
+            for (const actual of [0, allowed, allowed + 1]) {
+                const environment = setup(mismatchPopulation(total, actual), { instanceName });
+                for (const check of ['consistency', 'distribution']) {
+                    const result = environment.run(check);
+                    assert.equal(result.passed, actual <= allowed, result.message);
+                    assert.ok(result.message.includes('mismatches: ' + actual + ' actual | allowed: ' + allowed));
+                    assert.match(result.message, /0\.00002% of .* grouped VITs/);
+                    assert.match(result.message, /Environment: (Dev|Eng) \| (Pass|Fail)/);
+                    if (actual > allowed) assert.match(result.message, /above allowance by 1 records/);
+                }
+                assert.deepEqual(environment.propertyReads, ['instance_name', 'instance_name']);
+            }
+        }
+    }
+});
+
+test('Test, unknown and missing instance names always have zero tolerance', () => {
+    for (const instanceName of ['TEST', 'test', 'prod', 'prod-dev', 'engineering', '', null]) {
+        const environment = setup(mismatchPopulation(40000000, 1), { instanceName });
+        // Even an unsupported extra setting cannot relax Test's hard zero.
+        environment.helper.config.mismatchTolerance.test.maxPercent = 100;
+        for (const check of ['consistency', 'distribution']) {
+            const result = environment.run(check);
+            fail(result, /mismatches: 1 actual \| allowed: 0 \(0%/);
+            assert.doesNotMatch(result.message, /UPMC/);
+        }
+    }
+    const result = setup().run('consistency');
+    pass(result);
+    assert.match(result.message, /mismatches: 0 actual \| allowed: 0.*Environment: Test \| Pass/);
+});
+
+test('instance names and Dev/Eng percentages are editable together in the central block', () => {
+    const environment = setup(mismatchPopulation(40000000, 16), { instanceName: 'my-dev-instance' });
+    environment.helper.config.mismatchTolerance.dev.instanceName = 'MY-DEV-INSTANCE';
+    environment.helper.config.mismatchTolerance.dev.maxPercent = 0.00004;
+    pass(environment.run('consistency'));
+    environment.helper.config.mismatchTolerance.dev.maxPercent = 0;
+    fail(environment.run('consistency'), /allowed: 0/);
+    environment.helper.config.mismatchTolerance.dev.instanceName = 'different-dev';
+    environment.helper.config.mismatchTolerance.eng.instanceName = 'my-dev-instance';
+    environment.helper.config.mismatchTolerance.eng.maxPercent = 0.00004;
+    const result = environment.run('consistency');
+    pass(result);
+    assert.match(result.message, /Environment: Eng/);
+    environment.helper.config.mismatchTolerance.eng.instanceName = 'different-eng';
+    environment.helper.config.mismatchTolerance.test.instanceName = 'my-dev-instance';
+    fail(environment.run('consistency'), /allowed: 0.*Environment: Test/);
+});
+
+test('mismatch allowance rounds down using grouped total, not the independent count', () => {
+    const environment = setup(mismatchPopulation(39999999, 8), { instanceName: 'DEV', populationCount: '40000000' });
+    fail(environment.run('consistency'), /allowed: 7 .*above allowance by 1 records/);
+    fail(setup(mismatchPopulation(100, 1), { instanceName: 'ENG' }).run('consistency'), /allowed: 0/);
+});
+
+test('invalid or ambiguous environment settings fail before queries', () => {
+    const invalidSettings = [
+        config => { config.mismatchTolerance = null; },
+        config => { config.mismatchTolerance.dev.instanceName = ' '; },
+        config => { config.mismatchTolerance.test.instanceName = ' dev '; },
+        config => { config.mismatchTolerance.eng.instanceName = 'DEV'; },
+        ...[NaN, Infinity, -1, 101, '0.00002', null].map(value => config => { config.mismatchTolerance.dev.maxPercent = value; })
+    ];
+    for (const edit of invalidSettings) {
+        const environment = setup();
+        edit(environment.helper.config);
+        fail(environment.run('configuration'), /mismatch|Mismatch/);
+        assert.equal(environment.queries.length, 0);
+    }
+});
+
+test('lookup errors remain failures and early checks do not read instance properties', () => {
+    const environment = setup(healthy, { propertyError: true });
+    for (const check of ['configuration', 'population', 'values']) pass(environment.run(check));
+    assert.deepEqual(environment.propertyReads, []);
+    fail(environment.run('consistency'), /Instance property unavailable/);
+    fail(environment.run('distribution'), /Instance property unavailable/);
+});
+
+test('accepted mismatches never suppress other checks or distribution reporting', () => {
+    const edits = [
+        environment => { environment.helper.config.minimumRecords = 40000001; },
+        environment => { environment.helper.config.maximumRecords = 39999999; },
+        environment => { environment.helper.config.ratings[2].maxPercent = 50; },
+        environment => { environment.helper.config.meanScore = { min: 0, max: 1 }; }
+    ];
+    for (const edit of edits) {
+        const environment = setup(mismatchPopulation(40000000, 8), { instanceName: 'DEV' });
+        edit(environment);
+        const result = environment.run('distribution');
+        fail(result);
+        assert.match(result.message, /mismatches: 8 actual \| allowed: 8.*\| Pass/);
+        for (const label of ['Critical', 'High', 'Medium', 'Low', 'None']) assert.ok(result.message.includes(label + ': '));
+    }
+    fail(setup(mismatchPopulation(40000000, 8), { instanceName: 'DEV', populationCount: '41000000' }).run('consistency'), /count variance exceeds/);
+    for (const bad of [vit(null, '5'), vit('0', null)]) {
+        fail(setup([...mismatchPopulation(40000000, 8), bad], { instanceName: 'ENG' }).run('consistency'), /Missing\/invalid/);
+    }
 });
 
 test('every ATF wrapper calls the VR-scoped helper and asserts the actual result', () => {

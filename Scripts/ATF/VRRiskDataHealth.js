@@ -49,12 +49,24 @@ VRRiskDataHealth.prototype = {
                 { value: '4', label: 'Low',      scoreMin: 1,  scoreMax: 39,  minPercent: 55, maxPercent: 85 },
                 { value: '5', label: 'None',     scoreMin: 0,  scoreMax: 0,   minPercent: 0, maxPercent: 10 }
             ],
-            // 5. OPTIONAL MEAN-SCORE BOUNDS
+            // 5. SCORE/RATING MISMATCH ALLOWANCE BY INSTANCE
+            // Exact instance_name property values, ignoring case/outer whitespace.
+            // Replace DEV/ENG/TEST with your actual instance names if different.
+            // Only Dev and Eng can have an allowance; Test and all others stay at 0.
+            // Percentage of grouped VITs; fractional allowed counts round DOWN.
+            // 0.00002% allows 8 mismatches at 40 million, 20 at 100 million.
+            mismatchTolerance: {
+                dev: { instanceName: 'DEV', maxPercent: 0.00002 },
+                eng: { instanceName: 'ENG', maxPercent: 0.00002 },
+                test: { instanceName: 'TEST' }
+            },
+
+            // 6. OPTIONAL MEAN-SCORE BOUNDS
             // Helps catch lower scores even within the same rating.
             // Both null disables this extra check; otherwise set BOTH bounds.
             meanScore: { min: null, max: null },
 
-            // 6. REPORT DISPLAY (comparisons always use full precision)
+            // 7. REPORT DISPLAY (comparisons always use full precision)
             outputDecimals: 6
         };
         /**************** END OF ALL EDITABLE TEST SETTINGS ****************/
@@ -78,11 +90,12 @@ VRRiskDataHealth.prototype = {
             if (snapshot.invalidScores) failures.push('Missing/invalid scores: ' + snapshot.invalidScores);
             if (snapshot.invalidRatings) failures.push('Missing/invalid ratings: ' + snapshot.invalidRatings);
             if (check === 'values') return this._result(prefix, failures);
-            if (snapshot.mismatches) failures.push('Score/rating mismatches: ' + snapshot.mismatches);
-            if (check === 'consistency') return this._result(prefix, failures);
+            var mismatch = this._mismatchStatus(snapshot);
+            if (!mismatch.passed) failures.push(mismatch.message);
+            if (check === 'consistency') return this._result(prefix, failures, mismatch.passed ? [mismatch.message] : []);
 
             // Step 5 always includes ALL five categories, even with prerequisite failures.
-            var rows = [];
+            var rows = mismatch.passed ? [mismatch.message] : [];
             for (var i = 0; i < this.config.ratings.length; i++) {
                 var rating = this.config.ratings[i];
                 if (!snapshot.total) {
@@ -121,6 +134,45 @@ VRRiskDataHealth.prototype = {
         }
     },
 
+    _instanceName: function(value) {
+        return String(value || '').replace(/^\s+|\s+$/g, '').toLowerCase();
+    },
+    _mismatchStatus: function(snapshot) {
+        var instance = this._instanceName(gs.getProperty('instance_name', ''));
+        var settings = this.config.mismatchTolerance;
+        var environment = 'Unmatched instance';
+        var percent = 0;
+        if (instance === this._instanceName(settings.dev.instanceName)) {
+            environment = 'Dev';
+            percent = settings.dev.maxPercent;
+        } else if (instance === this._instanceName(settings.eng.instanceName)) {
+            environment = 'Eng';
+            percent = settings.eng.maxPercent;
+        } else if (instance === this._instanceName(settings.test.instanceName)) environment = 'Test';
+        var allowed = Math.floor(snapshot.total * percent / 100);
+        var passed = snapshot.mismatches <= allowed;
+        return { passed: passed, message: 'Score/rating mismatches: ' + snapshot.mismatches +
+            ' actual | allowed: ' + allowed + ' (' + percent + '% of ' + snapshot.total +
+            ' grouped VITs) | Environment: ' + environment + ' | ' + (passed ? 'Pass' : 'Fail') +
+            (passed ? ' | within allowance' : ' | above allowance by ' + (snapshot.mismatches - allowed) + ' records') };
+    },
+    _validateMismatchTolerance: function() {
+        var settings = this.config.mismatchTolerance;
+        if (!settings) throw new Error('Configure mismatchTolerance for Dev, Eng and Test.');
+        var keys = ['dev', 'eng', 'test'];
+        var seen = {};
+        for (var i = 0; i < keys.length; i++) {
+            var entry = settings[keys[i]];
+            if (!entry || typeof entry.instanceName !== 'string' || !this._instanceName(entry.instanceName))
+                throw new Error('mismatchTolerance.' + keys[i] + '.instanceName must be a nonempty string.');
+            var name = this._instanceName(entry.instanceName);
+            if (seen['name:' + name]) throw new Error('Mismatch tolerance instance names must be distinct.');
+            seen['name:' + name] = true;
+            if (keys[i] !== 'test' && (typeof entry.maxPercent !== 'number' || !isFinite(entry.maxPercent) ||
+                entry.maxPercent < 0 || entry.maxPercent > 100))
+                throw new Error('mismatchTolerance.' + keys[i] + '.maxPercent must be a number from 0 through 100.');
+        }
+    },
     _populationFailures: function(snapshot) {
         var failures = [];
         if (snapshot.countDifference > snapshot.allowedCountDifference)
@@ -160,6 +212,7 @@ VRRiskDataHealth.prototype = {
         var config = this.config;
         if (config.configurationReviewed !== true)
             throw new Error('Review ALL TEST SETTINGS in initialize, including count tolerance; then set configurationReviewed to true.');
+        this._validateMismatchTolerance();
         if (!this._integer(config.minimumRecords) || config.minimumRecords < 1)
             throw new Error('minimumRecords must be a positive integer.');
         if (!this._integer(config.maximumRecords) || config.maximumRecords < config.minimumRecords)

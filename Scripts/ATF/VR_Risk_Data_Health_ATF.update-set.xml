@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <unload unload_date="2026-09-28 00:00:00">
   <sys_remote_update_set action="INSERT_OR_UPDATE">
-    <sys_id>96139f53b5dbb84cd7115ea6f9c22952</sys_id>
-    <name>CMPNY VR: Risk score and rating health - USEM - v3</name>
+    <sys_id>acda6cc9f57330fdcb9045e965600dba</sys_id>
+    <name>CMPNY VR: Risk score and rating health - USEM - v4</name>
     <description>One Vulnerability Response ATF test, five Run Server Side Script steps and VRRiskDataHealth. Review sample percentage ranges before running; add to an existing suite. Reads VIT data only.</description>
     <application>054cdcc2ff200200158bffffffffff94</application>
     <application_name>Vulnerability Response</application_name>
     <application_scope>sn_vul</application_scope>
-    <remote_sys_id>6388826b0a37fd7edc8d2087a79f9060</remote_sys_id>
+    <remote_sys_id>d64033ae8ebaf9733ae7add73cd224d9</remote_sys_id>
     <state>loaded</state>
     <sys_created_by>repository</sys_created_by>
     <sys_updated_by>repository</sys_updated_by>
@@ -16,7 +16,7 @@
     <sys_mod_count>0</sys_mod_count>
   </sys_remote_update_set>
   <sys_update_xml action="INSERT_OR_UPDATE">
-    <sys_id>8d9997534be7fe2b14785e0733bd944b</sys_id>
+    <sys_id>4e319fe79fc1741d3b09c74652dce61b</sys_id>
     <action>INSERT_OR_UPDATE</action>
     <application>054cdcc2ff200200158bffffffffff94</application>
     <category>customer</category>
@@ -72,12 +72,24 @@ VRRiskDataHealth.prototype = {
                 { value: '4', label: 'Low',      scoreMin: 1,  scoreMax: 39,  minPercent: 55, maxPercent: 85 },
                 { value: '5', label: 'None',     scoreMin: 0,  scoreMax: 0,   minPercent: 0, maxPercent: 10 }
             ],
-            // 5. OPTIONAL MEAN-SCORE BOUNDS
+            // 5. SCORE/RATING MISMATCH ALLOWANCE BY INSTANCE
+            // Exact instance_name property values, ignoring case/outer whitespace.
+            // Replace DEV/ENG/TEST with your actual instance names if different.
+            // Only Dev and Eng can have an allowance; Test and all others stay at 0.
+            // Percentage of grouped VITs; fractional allowed counts round DOWN.
+            // 0.00002% allows 8 mismatches at 40 million, 20 at 100 million.
+            mismatchTolerance: {
+                dev: { instanceName: 'DEV', maxPercent: 0.00002 },
+                eng: { instanceName: 'ENG', maxPercent: 0.00002 },
+                test: { instanceName: 'TEST' }
+            },
+
+            // 6. OPTIONAL MEAN-SCORE BOUNDS
             // Helps catch lower scores even within the same rating.
             // Both null disables this extra check; otherwise set BOTH bounds.
             meanScore: { min: null, max: null },
 
-            // 6. REPORT DISPLAY (comparisons always use full precision)
+            // 7. REPORT DISPLAY (comparisons always use full precision)
             outputDecimals: 6
         };
         /**************** END OF ALL EDITABLE TEST SETTINGS ****************/
@@ -101,11 +113,12 @@ VRRiskDataHealth.prototype = {
             if (snapshot.invalidScores) failures.push('Missing/invalid scores: ' + snapshot.invalidScores);
             if (snapshot.invalidRatings) failures.push('Missing/invalid ratings: ' + snapshot.invalidRatings);
             if (check === 'values') return this._result(prefix, failures);
-            if (snapshot.mismatches) failures.push('Score/rating mismatches: ' + snapshot.mismatches);
-            if (check === 'consistency') return this._result(prefix, failures);
+            var mismatch = this._mismatchStatus(snapshot);
+            if (!mismatch.passed) failures.push(mismatch.message);
+            if (check === 'consistency') return this._result(prefix, failures, mismatch.passed ? [mismatch.message] : []);
 
             // Step 5 always includes ALL five categories, even with prerequisite failures.
-            var rows = [];
+            var rows = mismatch.passed ? [mismatch.message] : [];
             for (var i = 0; i &amp;lt; this.config.ratings.length; i++) {
                 var rating = this.config.ratings[i];
                 if (!snapshot.total) {
@@ -144,6 +157,45 @@ VRRiskDataHealth.prototype = {
         }
     },
 
+    _instanceName: function(value) {
+        return String(value || '').replace(/^\s+|\s+$/g, '').toLowerCase();
+    },
+    _mismatchStatus: function(snapshot) {
+        var instance = this._instanceName(gs.getProperty('instance_name', ''));
+        var settings = this.config.mismatchTolerance;
+        var environment = 'Unmatched instance';
+        var percent = 0;
+        if (instance === this._instanceName(settings.dev.instanceName)) {
+            environment = 'Dev';
+            percent = settings.dev.maxPercent;
+        } else if (instance === this._instanceName(settings.eng.instanceName)) {
+            environment = 'Eng';
+            percent = settings.eng.maxPercent;
+        } else if (instance === this._instanceName(settings.test.instanceName)) environment = 'Test';
+        var allowed = Math.floor(snapshot.total * percent / 100);
+        var passed = snapshot.mismatches &amp;lt;= allowed;
+        return { passed: passed, message: 'Score/rating mismatches: ' + snapshot.mismatches +
+            ' actual | allowed: ' + allowed + ' (' + percent + '% of ' + snapshot.total +
+            ' grouped VITs) | Environment: ' + environment + ' | ' + (passed ? 'Pass' : 'Fail') +
+            (passed ? ' | within allowance' : ' | above allowance by ' + (snapshot.mismatches - allowed) + ' records') };
+    },
+    _validateMismatchTolerance: function() {
+        var settings = this.config.mismatchTolerance;
+        if (!settings) throw new Error('Configure mismatchTolerance for Dev, Eng and Test.');
+        var keys = ['dev', 'eng', 'test'];
+        var seen = {};
+        for (var i = 0; i &amp;lt; keys.length; i++) {
+            var entry = settings[keys[i]];
+            if (!entry || typeof entry.instanceName !== 'string' || !this._instanceName(entry.instanceName))
+                throw new Error('mismatchTolerance.' + keys[i] + '.instanceName must be a nonempty string.');
+            var name = this._instanceName(entry.instanceName);
+            if (seen['name:' + name]) throw new Error('Mismatch tolerance instance names must be distinct.');
+            seen['name:' + name] = true;
+            if (keys[i] !== 'test' &amp;amp;&amp;amp; (typeof entry.maxPercent !== 'number' || !isFinite(entry.maxPercent) ||
+                entry.maxPercent &amp;lt; 0 || entry.maxPercent &amp;gt; 100))
+                throw new Error('mismatchTolerance.' + keys[i] + '.maxPercent must be a number from 0 through 100.');
+        }
+    },
     _populationFailures: function(snapshot) {
         var failures = [];
         if (snapshot.countDifference &amp;gt; snapshot.allowedCountDifference)
@@ -183,6 +235,7 @@ VRRiskDataHealth.prototype = {
         var config = this.config;
         if (config.configurationReviewed !== true)
             throw new Error('Review ALL TEST SETTINGS in initialize, including count tolerance; then set configurationReviewed to true.');
+        this._validateMismatchTolerance();
         if (!this._integer(config.minimumRecords) || config.minimumRecords &amp;lt; 1)
             throw new Error('minimumRecords must be a positive integer.');
         if (!this._integer(config.maximumRecords) || config.maximumRecords &amp;lt; config.minimumRecords)
@@ -330,7 +383,7 @@ VRRiskDataHealth.prototype = {
     type: 'VRRiskDataHealth'
 };
 &lt;/script&gt;&lt;/sys_script_include&gt;&lt;/record_update&gt;</payload>
-    <remote_update_set>96139f53b5dbb84cd7115ea6f9c22952</remote_update_set>
+    <remote_update_set>acda6cc9f57330fdcb9045e965600dba</remote_update_set>
     <replace_on_upgrade>false</replace_on_upgrade>
     <target_name>VRRiskDataHealth</target_name>
     <type>Script Include</type>
@@ -342,13 +395,13 @@ VRRiskDataHealth.prototype = {
     <sys_mod_count>0</sys_mod_count>
   </sys_update_xml>
   <sys_update_xml action="INSERT_OR_UPDATE">
-    <sys_id>d51f6c074983313d37d445cc1f12a96c</sys_id>
+    <sys_id>3c4e72e3e03dc1eb283749a3b7e30712</sys_id>
     <action>INSERT_OR_UPDATE</action>
     <application>054cdcc2ff200200158bffffffffff94</application>
     <category>customer</category>
     <name>sys_atf_test_02b44aa40600d0b7c6ad7d964b32b67a</name>
     <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_atf_test"&gt;&lt;sys_atf_test action="INSERT_OR_UPDATE" apply_defaults="true"&gt;&lt;sys_id&gt;02b44aa40600d0b7c6ad7d964b32b67a&lt;/sys_id&gt;&lt;sys_class_name&gt;sys_atf_test&lt;/sys_class_name&gt;&lt;sys_name&gt;CMPNY VR: Risk score and rating health - USEM&lt;/sys_name&gt;&lt;sys_update_name&gt;sys_atf_test_02b44aa40600d0b7c6ad7d964b32b67a&lt;/sys_update_name&gt;&lt;sys_customer_update&gt;true&lt;/sys_customer_update&gt;&lt;sys_replace_on_upgrade&gt;false&lt;/sys_replace_on_upgrade&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_created_by&gt;repository&lt;/sys_created_by&gt;&lt;sys_updated_by&gt;repository&lt;/sys_updated_by&gt;&lt;sys_created_on&gt;2026-09-28 00:00:00&lt;/sys_created_on&gt;&lt;sys_updated_on&gt;2026-09-28 00:00:00&lt;/sys_updated_on&gt;&lt;sys_scope display_value="Vulnerability Response"&gt;054cdcc2ff200200158bffffffffff94&lt;/sys_scope&gt;&lt;sys_package display_value="Vulnerability Response" source="sn_vul"&gt;054cdcc2ff200200158bffffffffff94&lt;/sys_package&gt;&lt;name&gt;CMPNY VR: Risk score and rating health - USEM&lt;/name&gt;&lt;active&gt;true&lt;/active&gt;&lt;description&gt;Read-only health checks for existing VIT risk scores and ratings. Configure VRRiskDataHealth before running after imports and recalculation finish. Add this test to your existing suite.&lt;/description&gt;&lt;enable_parameterized_testing&gt;false&lt;/enable_parameterized_testing&gt;&lt;fail_on_server_error&gt;true&lt;/fail_on_server_error&gt;&lt;/sys_atf_test&gt;&lt;/record_update&gt;</payload>
-    <remote_update_set>96139f53b5dbb84cd7115ea6f9c22952</remote_update_set>
+    <remote_update_set>acda6cc9f57330fdcb9045e965600dba</remote_update_set>
     <replace_on_upgrade>false</replace_on_upgrade>
     <target_name>CMPNY VR: Risk score and rating health - USEM</target_name>
     <type>Test</type>
@@ -360,7 +413,7 @@ VRRiskDataHealth.prototype = {
     <sys_mod_count>0</sys_mod_count>
   </sys_update_xml>
   <sys_update_xml action="INSERT_OR_UPDATE">
-    <sys_id>23b1c6d35d6658d9f52049199d0935e4</sys_id>
+    <sys_id>6f583996bd68ad6a64cc8b4578a2d4c4</sys_id>
     <action>INSERT_OR_UPDATE</action>
     <application>054cdcc2ff200200158bffffffffff94</application>
     <category>customer</category>
@@ -373,7 +426,7 @@ VRRiskDataHealth.prototype = {
     return result.passed;
 })(outputs, steps, stepResult, assertEqual);
 &lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
-    <remote_update_set>96139f53b5dbb84cd7115ea6f9c22952</remote_update_set>
+    <remote_update_set>acda6cc9f57330fdcb9045e965600dba</remote_update_set>
     <replace_on_upgrade>false</replace_on_upgrade>
     <target_name>Configuration and fields</target_name>
     <type>Test Step</type>
@@ -385,7 +438,7 @@ VRRiskDataHealth.prototype = {
     <sys_mod_count>0</sys_mod_count>
   </sys_update_xml>
   <sys_update_xml action="INSERT_OR_UPDATE">
-    <sys_id>553ce049e9dc993809f43b4f052c8c84</sys_id>
+    <sys_id>e724ac232504411b2eba6313d4b8c334</sys_id>
     <action>INSERT_OR_UPDATE</action>
     <application>054cdcc2ff200200158bffffffffff94</application>
     <category>customer</category>
@@ -398,7 +451,7 @@ VRRiskDataHealth.prototype = {
     return result.passed;
 })(outputs, steps, stepResult, assertEqual);
 &lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
-    <remote_update_set>96139f53b5dbb84cd7115ea6f9c22952</remote_update_set>
+    <remote_update_set>acda6cc9f57330fdcb9045e965600dba</remote_update_set>
     <replace_on_upgrade>false</replace_on_upgrade>
     <target_name>Population bounds</target_name>
     <type>Test Step</type>
@@ -410,7 +463,7 @@ VRRiskDataHealth.prototype = {
     <sys_mod_count>0</sys_mod_count>
   </sys_update_xml>
   <sys_update_xml action="INSERT_OR_UPDATE">
-    <sys_id>0c6a45c831e6e1d9fa23010d7ab7e9e6</sys_id>
+    <sys_id>8de9594595dbf398e88bc777b4853f36</sys_id>
     <action>INSERT_OR_UPDATE</action>
     <application>054cdcc2ff200200158bffffffffff94</application>
     <category>customer</category>
@@ -423,7 +476,7 @@ VRRiskDataHealth.prototype = {
     return result.passed;
 })(outputs, steps, stepResult, assertEqual);
 &lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
-    <remote_update_set>96139f53b5dbb84cd7115ea6f9c22952</remote_update_set>
+    <remote_update_set>acda6cc9f57330fdcb9045e965600dba</remote_update_set>
     <replace_on_upgrade>false</replace_on_upgrade>
     <target_name>Score and rating values</target_name>
     <type>Test Step</type>
@@ -435,7 +488,7 @@ VRRiskDataHealth.prototype = {
     <sys_mod_count>0</sys_mod_count>
   </sys_update_xml>
   <sys_update_xml action="INSERT_OR_UPDATE">
-    <sys_id>48b2a27a246c258d3ae3b19ca5959c4a</sys_id>
+    <sys_id>b0504a425cd60725b1fccbbc17fafdc7</sys_id>
     <action>INSERT_OR_UPDATE</action>
     <application>054cdcc2ff200200158bffffffffff94</application>
     <category>customer</category>
@@ -448,7 +501,7 @@ VRRiskDataHealth.prototype = {
     return result.passed;
 })(outputs, steps, stepResult, assertEqual);
 &lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
-    <remote_update_set>96139f53b5dbb84cd7115ea6f9c22952</remote_update_set>
+    <remote_update_set>acda6cc9f57330fdcb9045e965600dba</remote_update_set>
     <replace_on_upgrade>false</replace_on_upgrade>
     <target_name>Score/rating consistency</target_name>
     <type>Test Step</type>
@@ -460,7 +513,7 @@ VRRiskDataHealth.prototype = {
     <sys_mod_count>0</sys_mod_count>
   </sys_update_xml>
   <sys_update_xml action="INSERT_OR_UPDATE">
-    <sys_id>de3f1d12cc30a24226f3b4d1f877e437</sys_id>
+    <sys_id>21b20bba88051e94a1765e825e527c09</sys_id>
     <action>INSERT_OR_UPDATE</action>
     <application>054cdcc2ff200200158bffffffffff94</application>
     <category>customer</category>
@@ -473,7 +526,7 @@ VRRiskDataHealth.prototype = {
     return result.passed;
 })(outputs, steps, stepResult, assertEqual);
 &lt;/value&gt;&lt;order&gt;200&lt;/order&gt;&lt;/sys_variable_value&gt;&lt;/record_update&gt;</payload>
-    <remote_update_set>96139f53b5dbb84cd7115ea6f9c22952</remote_update_set>
+    <remote_update_set>acda6cc9f57330fdcb9045e965600dba</remote_update_set>
     <replace_on_upgrade>false</replace_on_upgrade>
     <target_name>Rating distribution</target_name>
     <type>Test Step</type>
